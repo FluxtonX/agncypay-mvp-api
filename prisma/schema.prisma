@@ -1,0 +1,573 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── USER & AUTH ───────────────────────────
+
+model User {
+  id                  String    @id @default(uuid())
+  email               String    @unique
+  password            String
+  fullName            String
+  accountType         AccountType
+  agncyId             String    @unique
+  emailVerified       Boolean   @default(false)
+  resetToken          String?
+  resetTokenExpires   DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  deletedAt           DateTime?
+
+  // Relations
+  workspacesOwned Workspace[]
+  memberships     Membership[]
+  wallet          Wallet?
+  invoicesCreated Invoice[]     @relation("InvoiceCreator")
+  invoicesAsBrand Invoice[]     @relation("InvoiceBrand")
+  transactions    Transaction[]
+  treasury        BrandTreasury?
+  businessProfile BusinessProfile?
+  representative  Representative?
+  authorization   Authorization?
+  brandVerification BrandVerification?
+  bankDetails     BankDetails?
+  documents       Document[]
+  integrations    IntegrationConnection[]
+  quickBooksConnection QuickBooksConnection?
+  quickBooksInvoices   QuickBooksInvoice[]
+  refreshTokens   RefreshToken[]
+
+  @@map("users")
+
+}
+
+// ─────────────────────────── WALLET & LEDGER ───────────────────────────
+
+model Wallet {
+  id          String        @id @default(uuid())
+  walletId    String        @unique // Primary identity e.g. WAL-AGY-849201
+  userId      String        @unique
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountType AccountType
+  balance     Float         @default(0.0)
+  currency    String        @default("USD")
+  status      WalletStatus  @default(active)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  ledgerEntries WalletLedger[]
+  invoicesAsAgency Invoice[]   @relation("AgencyWalletInvoices")
+  invoicesAsBrand  Invoice[]   @relation("BrandWalletInvoices")
+
+  @@map("wallets")
+}
+
+enum WalletStatus {
+  active
+  frozen
+  suspended
+}
+
+model WalletLedger {
+  id            String     @id @default(uuid())
+  walletId      String
+  wallet        Wallet     @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  type          LedgerType
+  amount        Float
+  balanceAfter  Float
+  referenceType String     // INVOICE_PAYMENT, DEPOSIT, DISBURSEMENT
+  referenceId   String?
+  description   String     @default("")
+  createdAt     DateTime   @default(now())
+
+  @@map("wallet_ledgers")
+}
+
+enum LedgerType {
+  credit
+  debit
+}
+
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+enum AccountType {
+  brand
+  agency
+}
+
+// ─────────────────────────── WORKSPACE ───────────────────────────
+
+model Workspace {
+  id                 String             @id @default(uuid())
+  type               WorkspaceType
+  name               String
+  agncyId            String             @unique
+  verificationTrack  VerificationTrack  @default(kyb)
+  verificationStatus VerificationStatus @default(draft)
+  ownerId            String
+  owner              User               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  deletedAt          DateTime?
+
+  memberships Membership[]
+
+  @@map("workspaces")
+}
+
+model Membership {
+  id          String          @id @default(uuid())
+  userId      String
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  role        WorkspaceRole
+  permissions String[]
+  status      MembershipStatus @default(active)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  deletedAt   DateTime?
+
+  @@unique([userId, workspaceId])
+  @@map("memberships")
+}
+
+enum WorkspaceType {
+  brand
+  agency
+  mother_agency
+}
+
+enum VerificationTrack {
+  kyb
+  enterprise_kyb
+}
+
+enum VerificationStatus {
+  draft
+  submitted
+  in_review
+  requires_action
+  approved
+  rejected
+  suspended
+}
+
+enum WorkspaceRole {
+  admin
+  finance
+  approver
+  viewer
+  agency_admin
+  finance_manager
+  super_admin
+  treasury
+  finance_ops
+}
+
+enum MembershipStatus {
+  active
+  invited
+  requested
+}
+
+// ─────────────────────────── BUSINESS VERIFICATION ───────────────────────────
+
+model BusinessProfile {
+  id                 String    @id @default(uuid())
+  userId             String    @unique
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  legalName          String    @default("")
+  brandName          String    @default("")
+  businessType       String    @default("")
+  country            String    @default("")
+  registrationNumber String    @default("")
+  taxId              String?
+  website            String    @default("")
+  email              String    @default("")
+  phone              String?
+  industry           String    @default("")
+  address            String    @default("")
+  addressLine1       String    @default("")
+  addressLine2       String    @default("")
+  city               String    @default("")
+  businessState      String    @default("")
+  stateOrProvince    String    @default("")
+  zipCode            String    @default("")
+  postalCode         String    @default("")
+  companyDescription String    @default("")
+  firstName          String    @default("")
+  lastName           String    @default("")
+  dob                String    @default("")
+  ssnLast4           String    @default("")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  @@map("business_profiles")
+}
+
+model Representative {
+  id              String               @id @default(uuid())
+  userId          String               @unique
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName        String               @default("")
+  jobTitle        String               @default("")
+  dob             String               @default("")
+  nationality     String               @default("")
+  email           String               @default("")
+  phone           String               @default("")
+  address         String               @default("")
+  idType          String               @default("Passport")
+  idFrontUploaded Boolean              @default(false)
+  idBackUploaded  Boolean              @default(false)
+  selfieUploaded  Boolean              @default(false)
+  status          RepresentativeStatus @default(not_started)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  deletedAt       DateTime?
+
+  @@map("representatives")
+}
+
+enum RepresentativeStatus {
+  not_started
+  uploaded
+  processing
+  verified
+  rejected
+}
+
+model Authorization {
+  id                      String    @id @default(uuid())
+  userId                  String    @unique
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isOwner                 Boolean?
+  owns25Percent           Boolean?
+  isAuthorizedForPayments Boolean?
+  authLetterUploaded      Boolean   @default(false)
+  powerOfAttorneyUploaded Boolean   @default(false)
+  signatoryName           String    @default("")
+  signatoryEmail          String    @default("")
+  roleInCompany           String    @default("")
+  formationDate           String    @default("")
+  incorporationState      String    @default("")
+  employeeRange           String    @default("")
+  monthlyPaymentVolume    String    @default("")
+  owners                  Json      @default("[]")
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+  deletedAt               DateTime?
+
+  @@map("authorizations")
+}
+
+model BrandVerification {
+  id                          String             @id @default(uuid())
+  userId                      String             @unique
+  user                        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandName                   String             @default("")
+  officialWebsite             String             @default("")
+  officialEmail               String             @default("")
+  domainVerified              Boolean            @default(false)
+  trademarkNumber             String             @default("")
+  brandCategory               String             @default("")
+  logoUploaded                Boolean            @default(false)
+  brandProofUploaded          Boolean            @default(false)
+  trademarkCertUploaded       Boolean            @default(false)
+  distributorContractUploaded Boolean            @default(false)
+  authLetterUploaded          Boolean            @default(false)
+  domainVerificationCode      String             @default("123456")
+  domainCodeSent              Boolean            @default(false)
+  domainCodeAttempts          Int                @default(0)
+  emailDomainWarning          Boolean            @default(false)
+  status                      VerificationStatus @default(draft)
+  createdAt                   DateTime           @default(now())
+  updatedAt                   DateTime           @updatedAt
+  deletedAt                   DateTime?
+
+  @@map("brand_verifications")
+}
+
+model BankDetails {
+  id                String           @id @default(uuid())
+  userId            String           @unique
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountHolderName String           @default("")
+  bankName          String           @default("")
+  country           String           @default("")
+  currency          String           @default("USD")
+  accountNumber     String           @default("")
+  routingNumber     String           @default("")
+  bankAddress       String           @default("")
+  statementUploaded Boolean          @default(false)
+  holderNameWarning Boolean          @default(false)
+  plaidAccessToken  String?
+  plaidAccountId    String?
+  plaidItemId       String?
+  status            BankDetailStatus @default(not_started)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  deletedAt         DateTime?
+
+  @@map("bank_details")
+}
+
+enum BankDetailStatus {
+  not_started
+  uploaded
+  processing
+  approved
+  rejected
+}
+
+model Document {
+  id         String         @id @default(uuid())
+  userId     String
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String
+  type       String
+  status     DocumentStatus @default(not_uploaded)
+  fileUrl    String?
+  uploadedAt DateTime?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  deletedAt  DateTime?
+
+  @@map("documents")
+}
+
+enum DocumentStatus {
+  not_uploaded
+  uploaded
+  approved
+  rejected
+}
+
+// ─────────────────────────── INVOICES & TRANSACTIONS ───────────────────────────
+
+model Invoice {
+  id             String        @id @default(uuid())
+  invoiceNumber  String        @unique
+  campaign       String        @default("")
+  agencyId       String
+  agency         User          @relation("InvoiceCreator", fields: [agencyId], references: [id])
+  agencyEmail    String
+  agencyWalletId String?
+  agencyWallet   Wallet?       @relation("AgencyWalletInvoices", fields: [agencyWalletId], references: [id])
+  brandId        String
+  brand          User          @relation("InvoiceBrand", fields: [brandId], references: [id])
+  brandName      String
+  brandEmail     String
+  brandWalletId  String?
+  brandWallet    Wallet?       @relation("BrandWalletInvoices", fields: [brandWalletId], references: [id])
+  amount         Float
+  due            String
+  status         InvoiceStatus @default(pending)
+  payoutStatus   PayoutStatus  @default(pending)
+  createdDate    String
+
+  payerId       String        @default("")
+  payerEmail    String        @default("")
+  payerAddress  String[]      @default([])
+  splits        Json          @default("[]")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  deletedAt     DateTime?
+
+  transactions Transaction[]
+
+  @@map("invoices")
+}
+
+enum InvoiceStatus {
+  pending
+  processing
+  paid
+  overdue
+}
+
+enum PayoutStatus {
+  pending
+  disbursed
+}
+
+model Transaction {
+  id             String            @id @default(uuid())
+  invoiceId      String
+  invoice        Invoice           @relation(fields: [invoiceId], references: [id])
+  userId         String
+  user           User              @relation(fields: [userId], references: [id])
+  amount         Float
+  currency       String            @default("USD")
+  timestamp      DateTime          @default(now())
+  paymentMethod  String            @default("")
+  paymentOrderId String?
+  counterpartyId String?
+  status         TransactionStatus @default(processing)
+  createdAt      DateTime          @default(now())
+  deletedAt      DateTime?
+
+  @@map("transactions")
+}
+
+enum TransactionStatus {
+  success
+  failed
+  processing
+}
+
+// ─────────────────────────── TREASURY ───────────────────────────
+
+model BrandTreasury {
+  id                String    @id @default(uuid())
+  userId            String    @unique
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance           Float     @default(25000)
+  lastDepositAmount Float?
+  lastDepositMethod String?
+  lastUpdated       DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  @@map("brand_treasuries")
+}
+
+// ─────────────────────────── INTEGRATIONS ───────────────────────────
+
+model IntegrationConnection {
+  id              String              @id @default(uuid())
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        IntegrationProvider
+  accessToken     String              @default("")
+  refreshToken    String              @default("")
+  realmId         String?
+  tenantId        String?
+  itemId          String?
+  institutionName String?
+  expiresAt       DateTime?
+  status          IntegrationStatus   @default(disconnected)
+  connectedAt     DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  deletedAt       DateTime?
+
+  @@unique([userId, provider])
+  @@map("integration_connections")
+}
+
+enum IntegrationProvider {
+  quickbooks
+  xero
+  plaid
+  sage
+}
+
+enum IntegrationStatus {
+  connected
+  disconnected
+  expired
+}
+
+// ─────────────────────────── AUDIT LOGS & FEATURE FLAGS ───────────────────────────
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String?
+  workspaceId String?
+  action      String
+  entityType  String
+  entityId    String?
+  details     Json     @default("{}")
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+model FeatureFlag {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  enabled     Boolean  @default(true)
+  description String   @default("")
+  rules       Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+// ─────────────────────────── QUICKBOOKS MODULE ───────────────────────────
+
+model QuickBooksConnection {
+  id           String                  @id @default(uuid())
+  agencyId     String                  @unique
+  agency       User                    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  realmId      String?
+  accessToken  String                  @default("")
+  refreshToken String                  @default("")
+  tokenExpiry  DateTime?
+  status       QuickBooksConnectStatus @default(disconnected)
+  connectedAt  DateTime?
+  lastSync     DateTime?
+  lastError    String?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+
+  @@map("quickbooks_connections")
+}
+
+enum QuickBooksConnectStatus {
+  disconnected
+  connecting
+  connected
+  syncing
+  expired
+  reconnect_required
+  sync_failed
+}
+
+model QuickBooksInvoice {
+  id                  String   @id @default(uuid())
+  agencyId            String
+  agency              User     @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  quickbooksInvoiceId String
+  invoiceNumber       String
+  customerName        String
+  amount              Float
+  currency            String   @default("USD")
+  issueDate           String
+  dueDate             String
+  status              String
+  syncedAt            DateTime @default(now())
+  rawPayload          Json     @default("{}")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([agencyId, quickbooksInvoiceId])
+  @@map("quickbooks_invoices")
+}
+
+
