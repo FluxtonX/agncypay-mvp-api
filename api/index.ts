@@ -11,13 +11,17 @@ const createExpressServer = async (expressInstance: any) => {
   const app = await NestFactory.create(
     AppModule,
     new ExpressAdapter(expressInstance),
-    { rawBody: true },
+    { rawBody: true, logger: ['error', 'warn', 'log'] },
   );
 
   app.setGlobalPrefix('api/v1');
 
   app.enableCors({
-    origin: process.env.FRONTEND_URL || '*',
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      // Allow all origins dynamically
+      callback(null, true);
+    },
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
   });
 
@@ -44,9 +48,28 @@ const createExpressServer = async (expressInstance: any) => {
 let cachedServer: any;
 
 export default async function handler(req: any, res: any) {
-  if (!cachedServer) {
-    await createExpressServer(server);
-    cachedServer = server;
+  // Directly respond to OPTIONS preflight requests to avoid function crashes
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
+    return res.status(200).end();
   }
-  return cachedServer(req, res);
+
+  try {
+    if (!cachedServer) {
+      await createExpressServer(server);
+      cachedServer = server;
+    }
+    return cachedServer(req, res);
+  } catch (err: any) {
+    console.error('Vercel Serverless NestJS initialization error:', err);
+    return res.status(500).json({
+      statusCode: 500,
+      error: 'Internal Server Error',
+      message: err.message || 'Serverless handler failed to initialize NestJS application',
+    });
+  }
 }
+
