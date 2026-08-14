@@ -38,6 +38,13 @@ describe('InvoicesService Modern Treasury Webhooks', () => {
       log: jest.fn().mockResolvedValue({ id: 'log1' }),
     };
 
+    const mockPrisma = {
+      bankDetails: { findUnique: jest.fn() },
+      webhookEvent: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({ id: 'we1' }) },
+      user: { findUnique: jest.fn().mockResolvedValue({ id: 'u1', modernTreasuryInternalAccountId: 'ia_1' }) },
+      payout: { findUnique: jest.fn(), update: jest.fn() },
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         InvoicesService,
@@ -46,7 +53,7 @@ describe('InvoicesService Modern Treasury Webhooks', () => {
         { provide: ModernTreasuryProvider, useValue: mockModernTreasuryProvider },
         { provide: AuditLogsService, useValue: mockAuditLogsService },
         { provide: WalletsService, useValue: mockWalletsService },
-        { provide: PrismaService, useValue: { bankDetails: { findUnique: jest.fn() } } },
+        { provide: PrismaService, useValue: mockPrisma },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();

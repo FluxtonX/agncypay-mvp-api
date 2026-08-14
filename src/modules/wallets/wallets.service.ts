@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { WalletRepository } from '../../infrastructure/database/repositories/wallet.repository';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
+import { ModernTreasuryProvider } from '../../infrastructure/providers/modern-treasury/modern-treasury.provider';
+import { PrismaService } from '../../prisma/prisma.service';
 import { AccountType, LedgerType, Wallet } from '@prisma/client';
 
 @Injectable()
@@ -8,6 +10,8 @@ export class WalletsService {
   constructor(
     private readonly walletRepo: WalletRepository,
     private readonly auditLogsService: AuditLogsService,
+    private readonly modernTreasuryProvider: ModernTreasuryProvider,
+    private readonly prisma: PrismaService,
   ) {}
 
   private generateWalletId(accountType: AccountType): string {
@@ -33,7 +37,8 @@ export class WalletsService {
         details: { walletId: wallet.walletId, accountType },
       });
     }
-    return wallet;
+
+    return this.syncWalletWithLedger(wallet);
   }
 
   async getWalletByUserId(userId: string): Promise<Wallet> {
@@ -41,13 +46,24 @@ export class WalletsService {
     if (!wallet) {
       throw new NotFoundException(`Wallet for user ${userId} not found`);
     }
-    return wallet;
+    return this.syncWalletWithLedger(wallet);
   }
 
   async getWalletByWalletId(walletId: string): Promise<Wallet> {
     const wallet = await this.walletRepo.findByWalletId(walletId);
     if (!wallet) {
       throw new NotFoundException(`Wallet ID ${walletId} not found`);
+    }
+    return this.syncWalletWithLedger(wallet);
+  }
+
+  async syncWalletWithLedger(wallet: Wallet): Promise<Wallet> {
+    const user = await this.prisma.user.findUnique({ where: { id: wallet.userId } });
+    if (user?.modernTreasuryLedgerAccountId) {
+      const ledgerBalance = await this.modernTreasuryProvider.getLedgerAccountBalance(user.modernTreasuryLedgerAccountId);
+      if (wallet.balance !== ledgerBalance.postedBalance) {
+        return this.walletRepo.update(wallet.id, { balance: ledgerBalance.postedBalance });
+      }
     }
     return wallet;
   }
@@ -67,15 +83,16 @@ export class WalletsService {
     description?: string;
   }) {
     const result = await this.walletRepo.addLedgerEntry(params);
+    const syncedWallet = await this.syncWalletWithLedger(result.wallet);
 
     await this.auditLogsService.log({
       userId: result.wallet.userId,
       action: `WALLET_${params.type.toUpperCase()}`,
       entityType: 'WalletLedger',
       entityId: result.ledgerEntry.id,
-      details: { amount: params.amount, newBalance: result.wallet.balance, referenceType: params.referenceType },
+      details: { amount: params.amount, newBalance: syncedWallet.balance, referenceType: params.referenceType },
     });
 
-    return result;
+    return { wallet: syncedWallet, ledgerEntry: result.ledgerEntry };
   }
 }

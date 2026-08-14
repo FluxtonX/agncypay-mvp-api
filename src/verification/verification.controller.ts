@@ -64,5 +64,22 @@ export class VerificationController {
   async updateBankDetails(@CurrentUser('id') userId: string, @Body() data: any) {
     return this.verificationService.updateBankDetails(userId, data);
   }
+
+  @ApiOperation({ summary: 'Submit Agency Legal Entity info to Modern Treasury for KYB' })
+  @Post('legal-entity')
+  async submitLegalEntity(@CurrentUser('id') userId: string) {
+    return this.verificationService.submitLegalEntityToModernTreasury(userId);
+  }
+
+  @ApiOperation({ summary: 'Setup Brand funding account as Modern Treasury External Account' })
+  @Post('brand/funding-account')
+  async setupBrandFundingAccount(
+    @CurrentUser('id') userId: string,
+    @Body('accountNumber') accountNumber: string,
+    @Body('routingNumber') routingNumber: string,
+    @Body('bankName') bankName?: string,
+  ) {
+    return this.verificationService.setupBrandFundingAccount(userId, accountNumber, routingNumber, bankName);
+  }
 }
 

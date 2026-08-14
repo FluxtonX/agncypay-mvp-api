@@ -5,6 +5,12 @@ import {
   IPaymentProvider,
   ACHPaymentRequest,
   ACHPaymentResponse,
+  LegalEntityParams,
+  CounterpartyParams,
+  ExternalAccountParams,
+  InternalAccountParams,
+  LedgerBalanceResponse,
+  PayoutParams,
 } from '../../../core/interfaces/payment-provider.interface';
 
 @Injectable()
@@ -31,8 +37,166 @@ export class ModernTreasuryProvider implements IPaymentProvider {
     }
   }
 
+  async createLegalEntity(params: LegalEntityParams): Promise<{ legalEntityId: string; status: string }> {
+    if (!this.client) {
+      this.logger.log(`Simulating MT Legal Entity creation for Agency ${params.agencyId} (${params.legalName})`);
+      return {
+        legalEntityId: `le_simulated_${Date.now()}`,
+        status: 'approved',
+      };
+    }
+
+    try {
+      const legalEntity = await this.client.legalEntities.create({
+        legal_entity_type: 'business',
+        business_name: params.legalName,
+        addresses: params.address
+          ? [
+              {
+                address_types: ['business'],
+                line1: params.address.line1 || '100 Main St',
+                line2: params.address.line2 || null,
+                locality: params.address.city || 'City',
+                region: params.address.state || 'State',
+                postal_code: params.address.postalCode || '10001',
+                country: params.address.country || 'USA',
+              },
+            ]
+          : [],
+      });
+
+      return {
+        legalEntityId: legalEntity.id,
+        status: (legalEntity as any).status || 'approved',
+      };
+    } catch (err) {
+      this.logger.error(`Modern Treasury Legal Entity creation failed: ${err.message}`, err.stack);
+      throw err;
+    }
+  }
+
+  async getLegalEntityStatus(legalEntityId: string): Promise<{ legalEntityId: string; status: string }> {
+    if (!this.client || legalEntityId.includes('simulated')) {
+      return { legalEntityId, status: 'approved' };
+    }
+
+    try {
+      const legalEntity = await this.client.legalEntities.retrieve(legalEntityId);
+      return {
+        legalEntityId: legalEntity.id,
+        status: (legalEntity as any).status || 'approved',
+      };
+    } catch (err) {
+      this.logger.error(`Failed to retrieve MT Legal Entity ${legalEntityId}: ${err.message}`);
+      return { legalEntityId, status: 'pending' };
+    }
+  }
+
+  async createCounterparty(params: CounterpartyParams): Promise<{ counterpartyId: string }> {
+    if (!this.client) {
+      this.logger.log(`Simulating MT Counterparty creation for ${params.name}`);
+      return { counterpartyId: `cp_simulated_${Date.now()}` };
+    }
+
+    try {
+      const counterparty = await this.client.counterparties.create({
+        name: params.name,
+        email: params.email || undefined,
+        metadata: params.metadata || {},
+      });
+      return { counterpartyId: counterparty.id };
+    } catch (err) {
+      this.logger.error(`Failed to create MT Counterparty: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async createExternalAccount(params: ExternalAccountParams): Promise<{ externalAccountId: string }> {
+    if (!this.client) {
+      this.logger.log(`Simulating MT External Account creation for Counterparty ${params.counterpartyId}`);
+      return { externalAccountId: `ea_simulated_${Date.now()}` };
+    }
+
+    try {
+      const externalAccount = await this.client.externalAccounts.create({
+        counterparty_id: params.counterpartyId,
+        name: params.name,
+        account_type: params.accountType || 'checking',
+        account_details: [
+          {
+            account_number: params.accountNumber,
+            account_number_type: 'other',
+          },
+        ],
+        routing_details: [
+          {
+            routing_number: params.routingNumber,
+            routing_number_type: 'aba',
+          },
+        ],
+      });
+
+      return { externalAccountId: externalAccount.id };
+    } catch (err) {
+      this.logger.error(`Failed to create MT External Account: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async createInternalAccount(params: InternalAccountParams): Promise<{ internalAccountId: string; ledgerAccountId?: string }> {
+    if (!this.client) {
+      this.logger.log(`Simulating MT Internal Account creation for ${params.name}`);
+      return {
+        internalAccountId: `ia_simulated_${Date.now()}`,
+        ledgerAccountId: `leg_simulated_${Date.now()}`,
+      };
+    }
+
+    try {
+      const internalAccount = await this.client.internalAccounts.create({
+        name: params.name,
+        party_name: params.name,
+        legal_entity_id: params.legalEntityId || undefined,
+        currency: (params.currency || 'USD') as any,
+      });
+
+      return {
+        internalAccountId: internalAccount.id,
+        ledgerAccountId: (internalAccount as any).ledger_account_id || `leg_${internalAccount.id}`,
+      };
+    } catch (err) {
+      this.logger.error(`Failed to create MT Internal Account: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async getLedgerAccountBalance(ledgerAccountId: string): Promise<LedgerBalanceResponse> {
+    if (!this.client || ledgerAccountId.includes('simulated')) {
+      return {
+        pendingBalance: 0,
+        postedBalance: 25000,
+        currency: 'USD',
+      };
+    }
+
+    try {
+      const ledgerAccount = await this.client.ledgerAccounts.retrieve(ledgerAccountId);
+      const balances = (ledgerAccount as any).balances || {};
+      const posted = balances.posted_balance?.amount ?? balances.posted_balance ?? 0;
+      const pending = balances.pending_balance?.amount ?? balances.pending_balance ?? 0;
+      return {
+        pendingBalance: Number(pending) / 100,
+        postedBalance: Number(posted) / 100,
+        currency: (ledgerAccount as any).currency || 'USD',
+      };
+    } catch (err) {
+      this.logger.error(`Failed to retrieve MT Ledger Account balance: ${err.message}`);
+      return { pendingBalance: 0, postedBalance: 0, currency: 'USD' };
+    }
+  }
+
   async processACHPayment(request: ACHPaymentRequest): Promise<ACHPaymentResponse> {
-    if (!this.client || !this.internalAccountId) {
+    if (!this.client) {
       this.logger.log(`Simulating Modern Treasury ACH payment for invoice ${request.invoiceId} ($${request.amount})`);
       return {
         paymentOrderId: `po_simulated_${Date.now()}`,
@@ -48,35 +212,45 @@ export class ModernTreasuryProvider implements IPaymentProvider {
     }
 
     try {
-      const counterparty = await this.client.counterparties.create({
-        name: `User ${request.recipientUserId}`,
-        accounting: { type: 'vendor' },
-        accounts: [
-          {
-            account_type: 'checking',
-            account_details: [
-              {
-                account_number: request.accountNumber || '1234567890',
-                account_number_type: 'other',
-              },
-            ],
-            routing_details: [
-              {
-                routing_number: request.routingNumber || '111000025',
-                routing_number_type: 'aba',
-              },
-            ],
-          },
-        ],
-      });
+      let originatingAccountId = request.originatingAccountId || this.internalAccountId;
+      let receivingAccountId = request.receivingAccountId;
+
+      if (!receivingAccountId) {
+        const counterparty = await this.client.counterparties.create({
+          name: `User ${request.recipientUserId}`,
+          accounting: { type: 'vendor' },
+          accounts: [
+            {
+              account_type: 'checking',
+              account_details: [
+                {
+                  account_number: request.accountNumber || '1234567890',
+                  account_number_type: 'other',
+                },
+              ],
+              routing_details: [
+                {
+                  routing_number: request.routingNumber || '111000025',
+                  routing_number_type: 'aba',
+                },
+              ],
+            },
+          ],
+        });
+        receivingAccountId = counterparty.accounts[0].id;
+      }
+
+      if (!originatingAccountId) {
+        throw new Error('No originating account ID provided for Payment Order');
+      }
 
       const paymentOrder = await this.client.paymentOrders.create({
         type: (request.paymentType as any) || 'ach',
         amount: Math.round(request.amount * 100),
         direction: 'credit',
         currency: (request.currency || 'USD') as any,
-        originating_account_id: this.internalAccountId,
-        receiving_account_id: counterparty.accounts[0].id,
+        originating_account_id: originatingAccountId,
+        receiving_account_id: receivingAccountId,
         metadata: {
           invoiceId: request.invoiceId,
           payerUserId: request.payerUserId,
@@ -88,7 +262,7 @@ export class ModernTreasuryProvider implements IPaymentProvider {
       return {
         paymentOrderId: paymentOrder.id,
         status: this.mapPaymentOrderStatus(paymentOrder.status),
-        counterpartyId: counterparty.id,
+        counterpartyId: receivingAccountId,
         details: paymentOrder,
       };
     } catch (err) {
@@ -97,6 +271,46 @@ export class ModernTreasuryProvider implements IPaymentProvider {
         paymentOrderId: `po_failed_${Date.now()}`,
         status: 'failed',
         counterpartyId: `cp_error_${request.recipientUserId}`,
+        details: { error: err.message },
+      };
+    }
+  }
+
+  async createPayout(params: PayoutParams): Promise<ACHPaymentResponse> {
+    if (!this.client) {
+      this.logger.log(`Simulating MT Payout ${params.payoutId} ($${params.amount}) for Agency ${params.agencyId}`);
+      return {
+        paymentOrderId: `po_payout_simulated_${Date.now()}`,
+        status: 'processing',
+        details: { simulated: true, payoutId: params.payoutId },
+      };
+    }
+
+    try {
+      const paymentOrder = await this.client.paymentOrders.create({
+        type: (params.paymentType as any) || 'ach',
+        amount: Math.round(params.amount * 100),
+        direction: 'credit',
+        currency: (params.currency || 'USD') as any,
+        originating_account_id: params.originatingInternalAccountId,
+        receiving_account_id: params.receivingExternalAccountId,
+        metadata: {
+          payoutId: params.payoutId,
+          agencyId: params.agencyId,
+          ...(params.metadata || {}),
+        },
+      });
+
+      return {
+        paymentOrderId: paymentOrder.id,
+        status: this.mapPaymentOrderStatus(paymentOrder.status),
+        details: paymentOrder,
+      };
+    } catch (err) {
+      this.logger.error(`Modern Treasury Payout creation failed: ${err.message}`, err.stack);
+      return {
+        paymentOrderId: `po_payout_failed_${Date.now()}`,
+        status: 'failed',
         details: { error: err.message },
       };
     }
@@ -174,4 +388,5 @@ export class ModernTreasuryProvider implements IPaymentProvider {
     }
   }
 }
+
 

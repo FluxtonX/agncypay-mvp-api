@@ -135,6 +135,8 @@ export class InvoicesService {
 
     // Handle Modern Treasury ACH Payment Execution and Wallet Ledger entry if marked paid or processing
     if (status === 'paid' && invoice.status !== 'paid') {
+      const brandUser = await this.prisma.user.findUnique({ where: { id: invoice.brandId } });
+      const agencyUser = await this.prisma.user.findUnique({ where: { id: invoice.agencyId } });
       const recipientBank = await this.prisma.bankDetails.findUnique({
         where: { userId: invoice.agencyId },
       });
@@ -145,6 +147,8 @@ export class InvoicesService {
         currency: 'USD',
         payerUserId: invoice.brandId,
         recipientUserId: invoice.agencyId,
+        originatingAccountId: brandUser?.modernTreasuryCounterpartyId || undefined,
+        receivingAccountId: agencyUser?.modernTreasuryInternalAccountId || undefined,
         accountNumber: recipientBank?.accountNumber,
         routingNumber: recipientBank?.routingNumber,
       });
@@ -152,7 +156,7 @@ export class InvoicesService {
       const brandWallet = await this.walletsService.getOrCreateWalletForUser(invoice.brandId, 'brand');
       const agencyWallet = await this.walletsService.getOrCreateWalletForUser(invoice.agencyId, 'agency');
 
-      // Double-entry ledger: Debit Brand Wallet, Credit Agency Wallet
+      // Double-entry ledger reference
       await this.walletsService.recordTransaction({
         walletId: brandWallet.walletId,
         type: 'debit',
@@ -192,17 +196,49 @@ export class InvoicesService {
       throw new UnauthorizedException('Invalid Modern Treasury webhook signature');
     }
 
+    const eventId = eventPayload?.id || eventPayload?.event_id || `evt_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     const eventType = eventPayload?.event || eventPayload?.type;
     const data = eventPayload?.data || eventPayload;
-    const invoiceId = data?.metadata?.invoiceId || data?.payment_order?.metadata?.invoiceId;
 
-    this.logger.log(`Processing Modern Treasury webhook event: ${eventType} for Invoice ID: ${invoiceId || 'N/A'}`);
+    // Webhook Idempotency Check
+    const existingEvent = await this.prisma.webhookEvent.findUnique({ where: { eventId } });
+    if (existingEvent) {
+      this.logger.log(`Ignoring duplicate Modern Treasury webhook event ID: ${eventId}`);
+      return { status: 'acknowledged', reason: 'Duplicate event' };
+    }
+
+    await this.prisma.webhookEvent.create({
+      data: {
+        eventId,
+        eventType: eventType || 'unknown',
+        status: 'processed',
+        payload: eventPayload,
+      },
+    });
+
+    const invoiceId = data?.metadata?.invoiceId || data?.payment_order?.metadata?.invoiceId;
+    const payoutId = data?.metadata?.payoutId || data?.payment_order?.metadata?.payoutId;
+
+    this.logger.log(`Processing Modern Treasury webhook event: ${eventType} (Invoice: ${invoiceId || 'N/A'}, Payout: ${payoutId || 'N/A'})`);
+
+    if (payoutId) {
+      const payout = await this.prisma.payout.findUnique({ where: { id: payoutId } });
+      if (payout) {
+        if (eventType === 'payment_order.completed') {
+          await this.prisma.payout.update({ where: { id: payoutId }, data: { status: 'disbursed' } });
+        } else if (eventType === 'payment_order.failed' || eventType === 'payment_order.denied') {
+          await this.prisma.payout.update({ where: { id: payoutId }, data: { status: 'failed' } });
+        } else if (eventType === 'payment_order.returned') {
+          await this.prisma.payout.update({ where: { id: payoutId }, data: { status: 'returned' } });
+        }
+      }
+    }
 
     if (!invoiceId) {
       await this.auditLogsService.log({
         action: 'MODERN_TREASURY_WEBHOOK_RECEIVED',
         entityType: 'WebhookEvent',
-        entityId: eventPayload?.id || 'unknown',
+        entityId: eventId,
         details: { eventType, unmapped: true, payload: data },
       });
       return { status: 'acknowledged', reason: 'No invoiceId in metadata' };

@@ -17,6 +17,7 @@ import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module
 import { WalletsModule } from './modules/wallets/wallets.module';
 import { QuickBooksModule } from './modules/quickbooks/quickbooks.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
+import { PayoutsModule } from './payouts/payouts.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     WalletsModule,
     QuickBooksModule,
     WebhooksModule,
+    PayoutsModule,
     AuthModule,
     UsersModule,
     WorkspacesModule,

@@ -27,6 +27,13 @@ model User {
   updatedAt           DateTime  @updatedAt
   deletedAt           DateTime?
 
+  // Modern Treasury Infrastructure Identifiers
+  modernTreasuryLegalEntityId     String?
+  modernTreasuryCounterpartyId    String?
+  modernTreasuryInternalAccountId String?
+  modernTreasuryLedgerAccountId   String?
+  kybStatus                       KybStatus @default(not_started)
+
   // Relations
   workspacesOwned Workspace[]
   memberships     Membership[]
@@ -45,6 +52,8 @@ model User {
   quickBooksConnection QuickBooksConnection?
   quickBooksInvoices   QuickBooksInvoice[]
   refreshTokens   RefreshToken[]
+  agencyExternalAccounts AgencyExternalAccount[]
+  payouts         Payout[]
 
   @@map("users")
 
@@ -407,9 +416,62 @@ enum InvoiceStatus {
   overdue
 }
 
+enum KybStatus {
+  not_started
+  pending
+  approved
+  rejected
+}
+
 enum PayoutStatus {
   pending
+  processing
   disbursed
+  failed
+  returned
+}
+
+model AgencyExternalAccount {
+  id                               String   @id @default(uuid())
+  agencyId                         String
+  agency                           User     @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  accountName                      String   @default("")
+  bankName                         String   @default("")
+  accountNumberMask                String   @default("")
+  routingNumber                    String   @default("")
+  modernTreasuryExternalAccountId String   @unique
+  isPrimary                        Boolean  @default(false)
+  createdAt                        DateTime @default(now())
+  updatedAt                        DateTime @updatedAt
+
+  @@map("agency_external_accounts")
+}
+
+model Payout {
+  id                           String       @id @default(uuid())
+  agencyId                     String
+  agency                       User         @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  amount                       Float
+  currency                     String       @default("USD")
+  destinationExternalAccountId String
+  paymentOrderId               String?      @unique
+  status                       PayoutStatus @default(pending)
+  metadata                     Json         @default("{}")
+  createdAt                    DateTime     @default(now())
+  updatedAt                    DateTime     @updatedAt
+
+  @@map("payouts")
+}
+
+model WebhookEvent {
+  id          String   @id @default(uuid())
+  eventId     String   @unique
+  eventType   String
+  status      String   @default("processed")
+  payload     Json     @default("{}")
+  processedAt DateTime @default(now())
+
+  @@map("webhook_events")
 }
 
 model Transaction {
