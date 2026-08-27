@@ -1,8 +1,7 @@
 /**
  * Cybrid API Request/Response Types
  *
- * Hand-written DTOs sourced from Cybrid's published OpenAPI spec.
- * Only includes the operations we actually use (~12 operations).
+ * Sourced and verified directly against the official Cybrid Bank & Org OpenAPI 3.0 specs.
  */
 
 // ─── Authentication ─────────────────────────────────────────────
@@ -58,7 +57,7 @@ export interface CybridIdentificationNumber {
 
 export interface CybridCustomerResponse {
   guid: string;
-  bank_guid: string;
+  bank_guid?: string;
   type: string;
   name?: CybridCustomerName;
   state: string; // 'storing' | 'verified' | 'unverified' | 'rejected' | 'frozen'
@@ -70,7 +69,14 @@ export interface CybridCustomerResponse {
 
 export interface CybridCreateIdentityVerificationRequest {
   type: 'kyc' | 'bank_account' | 'counterparty';
-  method: 'business_registration' | 'id_and_selfie' | 'attested' | 'plaid_identity_match' | 'attested_ownership';
+  method:
+    | 'business_registration'
+    | 'id_and_selfie'
+    | 'attested'
+    | 'attested_business_registration'
+    | 'plaid_identity_match'
+    | 'tax_id_and_regex'
+    | 'bank_account';
   customer_guid: string;
   country_code?: string;
   name?: CybridCustomerName;
@@ -95,20 +101,20 @@ export interface CybridIdentityVerificationResponse {
 // ─── Account ────────────────────────────────────────────────────
 
 export interface CybridCreateAccountRequest {
-  type: 'trading' | 'fiat' | 'fee' | 'gas' | 'reserve';
+  type: 'trading' | 'fiat' | 'invoice_operations' | 'storage';
   customer_guid?: string;
   asset: string;
-  name?: string;
+  name: string;
   labels?: string[];
 }
 
 export interface CybridAccountResponse {
   guid: string;
   type: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid?: string;
   asset: string;
-  name?: string;
+  name: string;
   state: string; // 'storing' | 'created'
   platform_balance?: string;
   platform_available?: string;
@@ -127,13 +133,16 @@ export interface CybridAccountListResponse {
 
 export interface CybridCreateDepositBankAccountRequest {
   account_guid: string;
-  type?: string;
+  type: 'main' | 'sub_account';
+  name?: string;
+  customer_guid?: string;
+  parent_deposit_bank_account_guid?: string;
   labels?: string[];
 }
 
 export interface CybridDepositBankAccountResponse {
   guid: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid?: string;
   account_guid: string;
   state: string;
@@ -154,24 +163,26 @@ export interface CybridCreateExternalBankAccountRequest {
   name: string;
   account_kind: 'plaid' | 'plaid_processor_token' | 'raw_routing_details';
   customer_guid?: string;
-  asset: string;
+  asset?: string;
   // For plaid_processor_token
   plaid_processor_token?: string;
   plaid_institution_id?: string;
   plaid_account_mask?: string;
   plaid_account_name?: string;
   // For raw_routing_details
-  routing_number_type?: string;
-  routing_number?: string;
-  account_number?: string;
   counterparty_guid?: string;
+  counterparty_bank_account?: {
+    routing_number_type?: 'CPA' | 'ABA' | 'IFSC';
+    routing_number?: string;
+    account_number?: string;
+  };
   labels?: string[];
 }
 
 export interface CybridExternalBankAccountResponse {
   guid: string;
   name: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid?: string;
   asset: string;
   account_kind: string;
@@ -196,7 +207,7 @@ export interface CybridCreateCounterpartyRequest {
   type: 'individual' | 'business';
   customer_guid: string;
   name: CybridCustomerName;
-  address?: CybridAddress;
+  address: CybridAddress; // Required by Cybrid OpenAPI spec
   date_of_birth?: string;
   email_address?: string;
   phone_number?: string;
@@ -205,7 +216,7 @@ export interface CybridCreateCounterpartyRequest {
 
 export interface CybridCounterpartyResponse {
   guid: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid: string;
   type: string;
   name: CybridCustomerName;
@@ -228,29 +239,23 @@ export interface CybridCreateQuoteRequest {
   customer_guid: string;
   asset?: string;
   symbol?: string;
-  side?: 'buy' | 'sell';
-  receive_amount?: string;
-  deliver_amount?: string;
-  fees?: CybridFee[];
-}
-
-export interface CybridFee {
-  type: string;
-  spread_fee?: string;
-  fixed_fee?: string;
+  side?: 'deposit' | 'withdrawal' | 'buy' | 'sell';
+  receive_amount?: number; // integer (cents/base units)
+  deliver_amount?: number; // integer (cents/base units)
+  payment_rail?: 'ach' | 'eft' | 'wire' | 'rtp' | 'etransfer';
 }
 
 export interface CybridQuoteResponse {
   guid: string;
   product_type: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid: string;
   side?: string;
   symbol?: string;
   asset?: string;
-  receive_amount?: string;
-  deliver_amount?: string;
-  fee?: string;
+  receive_amount?: number;
+  deliver_amount?: number;
+  fee?: number;
   issued_at: string;
   expires_at: string;
   created_at: string;
@@ -261,66 +266,96 @@ export interface CybridQuoteResponse {
 
 export interface CybridCreateTransferRequest {
   quote_guid: string;
-  transfer_type: 'funding' | 'book' | 'crypto' | 'instant_funding' | 'lightning';
+  transfer_type: 'funding' | 'crypto' | 'instant_funding' | 'inter_account' | 'lightning' | 'book';
+  payment_rail?: 'ach' | 'eft' | 'wire' | 'rtp' | 'etransfer';
   source_account_guid?: string;
-  source_participant?: CybridParticipant;
   destination_account_guid?: string;
-  destination_participant?: CybridParticipant;
   external_bank_account_guid?: string;
-  external_wallet_guid?: string;
+  beneficiary_memo?: string;
   labels?: string[];
-}
-
-export interface CybridParticipant {
-  type: string;
-  guid: string;
 }
 
 export interface CybridTransferResponse {
   guid: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid?: string;
   quote_guid: string;
   transfer_type: string;
-  source_account?: CybridTransferAccount;
-  destination_account?: CybridTransferAccount;
+  source_account?: { type: string; guid: string };
+  destination_account?: { type: string; guid: string };
   external_bank_account_guid?: string;
   state: string; // 'storing' | 'initiating' | 'reviewing' | 'pending' | 'completed' | 'failed' | 'returned'
-  amount?: string;
-  fee?: string;
-  estimated_amount?: string;
+  amount?: number;
+  fee?: number;
+  estimated_amount?: number;
   failure_code?: string;
   created_at: string;
   updated_at?: string;
-}
-
-export interface CybridTransferAccount {
-  type: string;
-  guid: string;
 }
 
 // ─── Trade ──────────────────────────────────────────────────────
 
 export interface CybridCreateTradeRequest {
   quote_guid: string;
-  expected_error?: string;
+  trade_type?: 'platform';
+  expected_error?: 'expired_quote' | 'non_sufficient_funds';
   labels?: string[];
 }
 
 export interface CybridTradeResponse {
   guid: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid?: string;
   quote_guid: string;
   side?: string;
   symbol?: string;
-  receive_amount?: string;
-  deliver_amount?: string;
-  fee?: string;
+  receive_amount?: number;
+  deliver_amount?: number;
+  fee?: number;
   state: string; // 'storing' | 'initiating' | 'pending' | 'settling' | 'completed' | 'failed'
   failure_code?: string;
   created_at: string;
   updated_at?: string;
+}
+
+// ─── Plans & Executions (Remittance) ────────────────────────────
+
+export interface CybridCreatePlanRequest {
+  type: 'remittance' | 'disbursement' | 'invoice_pay';
+  customer_guid?: string;
+  source_account: {
+    type: 'customer' | 'bank';
+    guid: string;
+  };
+  destination_account: {
+    type: 'customer' | 'bank';
+    guid: string;
+  };
+  purpose_of_transaction?: string;
+}
+
+export interface CybridPlanResponse {
+  guid: string;
+  type: string;
+  bank_guid?: string;
+  customer_guid?: string;
+  state: string;
+  failure_code?: string;
+  created_at: string;
+  expires_at?: string;
+}
+
+export interface CybridCreateExecutionRequest {
+  plan_guid: string;
+}
+
+export interface CybridExecutionResponse {
+  guid: string;
+  plan_guid: string;
+  type: string;
+  state: string;
+  failure_code?: string;
+  created_at: string;
 }
 
 // ─── Workflow ───────────────────────────────────────────────────
@@ -329,8 +364,8 @@ export interface CybridCreateWorkflowRequest {
   type: 'plaid';
   customer_guid?: string;
   external_bank_account_guid?: string;
-  kind?: string;
-  language?: string;
+  kind?: 'link_token_create' | 'link_token_update';
+  language?: 'en' | 'fr' | 'es' | 'nl' | 'de';
   link_customization_name?: string;
   redirect_uri?: string;
   android_package_name?: string;
@@ -338,7 +373,7 @@ export interface CybridCreateWorkflowRequest {
 
 export interface CybridWorkflowResponse {
   guid: string;
-  bank_guid: string;
+  bank_guid?: string;
   customer_guid?: string;
   type: string;
   state: string; // 'storing' | 'completed' | 'failed'
@@ -360,19 +395,6 @@ export interface CybridSubscriptionEventPayload {
   environment: string;
   created_at: string;
   updated_at?: string;
-}
-
-// ─── Pagination ─────────────────────────────────────────────────
-
-export interface CybridListParams {
-  page?: number;
-  per_page?: number;
-  guid?: string;
-  bank_guid?: string;
-  customer_guid?: string;
-  type?: string;
-  state?: string;
-  label?: string;
 }
 
 // ─── Error ──────────────────────────────────────────────────────

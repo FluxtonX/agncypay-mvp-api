@@ -125,7 +125,7 @@ export class PayoutsService {
           productType: 'funding',
           asset: 'USD',
           side: 'sell',
-          deliverAmount: String(Math.round(data.amount * 100)), // Cybrid uses integer base units
+          deliverAmount: Math.round(data.amount * 100), // Cybrid integer cents
         });
         quoteGuid = quote.guid;
 
@@ -291,7 +291,7 @@ export class PayoutsService {
           productType: 'trading',
           asset: 'USDC',
           side: 'buy',
-          deliverAmount: String(Math.round(data.amount * 100)),
+          deliverAmount: Math.round(data.amount * 100),
         });
         quoteGuid = quote.guid;
 
@@ -305,6 +305,39 @@ export class PayoutsService {
 
         // Step 3: Transition to TRADE_COMPLETED
         await this.payoutStateService.transition(payout.id, 'TRADE_COMPLETED');
+
+        // Step 4: Create Remittance Plan & Execution if destination external bank exists
+        if (externalBank) {
+          await this.payoutStateService.transition(payout.id, 'REMITTANCE_PENDING');
+          const agencyTradingAccount = await this.accountService.ensureTradingAccount(data.agencyId);
+
+          const plan = await this.cybridProvider.createPlan({
+            type: 'remittance',
+            customerGuid: agencyCustomer.cybridCustomerGuid,
+            sourceAccount: {
+              type: 'customer',
+              guid: agencyTradingAccount.cybridAccountGuid,
+            },
+            destinationAccount: {
+              type: 'customer',
+              guid: externalBank.cybridExternalBankGuid,
+            },
+            purposeOfTransaction: 'salary_payment',
+          });
+
+          await this.payoutStateService.transition(payout.id, 'EXECUTION_PENDING');
+          const execution = await this.cybridProvider.createExecution({
+            planGuid: plan.guid,
+          });
+
+          await this.prisma.paymentPayout.update({
+            where: { id: payout.id },
+            data: {
+              cybridPlanGuid: plan.guid,
+              cybridExecutionGuid: execution.guid,
+            },
+          });
+        }
       } else {
         quoteGuid = `quo_fx_${Date.now()}`;
         tradeGuid = `tra_fx_${Date.now()}`;

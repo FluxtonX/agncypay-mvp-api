@@ -47,6 +47,9 @@ export class VerificationService {
       bankDetails,
       documents,
       cybridCustomer,
+      kybStatus: cybridCustomer?.kybStatus || (businessProfile?.legalName ? 'pending' : 'not_started'),
+      legalEntityId: cybridCustomer?.cybridCustomerGuid || null,
+      depositAccount: cybridCustomer?.accounts?.flatMap((a) => a.depositBankAccounts)?.[0] || null,
     };
   }
 
@@ -95,20 +98,68 @@ export class VerificationService {
   }
 
   async updateBusinessProfile(userId: string, data: any) {
+    const allowedFields: Record<string, any> = {
+      legalName: data.legalName,
+      brandName: data.brandName || data.tradeName,
+      businessType: data.businessType,
+      country: data.country,
+      registrationNumber: data.registrationNumber,
+      taxId: data.taxId,
+      website: data.website,
+      email: data.email,
+      phone: data.phone,
+      industry: data.industry,
+      address: data.address,
+      addressLine1: data.addressLine1,
+      addressLine2: data.addressLine2,
+      city: data.city,
+      businessState: data.businessState || data.stateOrProvince,
+      stateOrProvince: data.stateOrProvince || data.businessState,
+      zipCode: data.zipCode || data.postalCode,
+      postalCode: data.postalCode || data.zipCode,
+      companyDescription: data.companyDescription,
+      firstName: data.firstName,
+      lastName: data.lastName,
+      dob: data.dob,
+      ssnLast4: data.ssnLast4,
+    };
+
+    const cleanData = Object.fromEntries(
+      Object.entries(allowedFields).filter(([_, v]) => v !== undefined && v !== null)
+    );
+
     const profile = await this.prisma.businessProfile.upsert({
       where: { userId },
-      update: data,
-      create: { userId, ...data },
+      update: cleanData,
+      create: { userId, ...cleanData },
     });
     await this.auditLogsService.log({ userId, action: 'BUSINESS_PROFILE_UPDATED', entityType: 'BusinessProfile', entityId: profile.id });
     return profile;
   }
 
   async updateRepresentative(userId: string, data: any) {
+    const allowedFields: Record<string, any> = {
+      fullName: data.fullName,
+      jobTitle: data.jobTitle,
+      dob: data.dob,
+      nationality: data.nationality,
+      email: data.email,
+      phone: data.phone,
+      address: data.address,
+      idType: data.idType,
+      idFrontUploaded: data.idFrontUploaded,
+      idBackUploaded: data.idBackUploaded,
+      selfieUploaded: data.selfieUploaded,
+    };
+
+    const cleanData = Object.fromEntries(
+      Object.entries(allowedFields).filter(([_, v]) => v !== undefined && v !== null)
+    );
+
     const rep = await this.prisma.representative.upsert({
       where: { userId },
-      update: data,
-      create: { userId, ...data },
+      update: cleanData,
+      create: { userId, ...cleanData },
     });
     await this.auditLogsService.log({ userId, action: 'REPRESENTATIVE_UPDATED', entityType: 'Representative', entityId: rep.id });
     return rep;

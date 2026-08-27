@@ -22,6 +22,10 @@ import {
   TransferResponse,
   CreateTradeParams,
   TradeResponse,
+  CreatePlanParams,
+  PlanResponse,
+  CreateExecutionParams,
+  ExecutionResponse,
   CreateWorkflowParams,
   WorkflowResponse,
 } from '../../../core/interfaces/financial-provider.interface';
@@ -47,17 +51,14 @@ import {
   CybridCreateTransferRequest,
   CybridTradeResponse,
   CybridCreateTradeRequest,
+  CybridPlanResponse,
+  CybridCreatePlanRequest,
+  CybridExecutionResponse,
+  CybridCreateExecutionRequest,
   CybridWorkflowResponse,
   CybridCreateWorkflowRequest,
 } from './cybrid.types';
 
-/**
- * Cybrid Financial Provider
- *
- * Implements IFinancialProvider using the Cybrid Bank API.
- * All methods delegate to CybridHttpClient for HTTP transport,
- * and map Cybrid's snake_case responses to our camelCase interfaces.
- */
 @Injectable()
 export class CybridProvider implements IFinancialProvider {
   private readonly logger = new Logger(CybridProvider.name);
@@ -66,8 +67,6 @@ export class CybridProvider implements IFinancialProvider {
     private readonly http: CybridHttpClient,
     private readonly config: CybridConfigService,
   ) {}
-
-  // ─── Authentication ──────────────────────────────────────────
 
   async authenticate(): Promise<string> {
     return this.http.authenticate();
@@ -82,7 +81,10 @@ export class CybridProvider implements IFinancialProvider {
     };
 
     if (params.email) {
-      (body as any).email_address = params.email;
+      body.email_address = params.email;
+    }
+    if (params.phone) {
+      body.phone_number = params.phone;
     }
 
     const resp = await this.http.post<CybridCustomerResponse>(
@@ -132,14 +134,13 @@ export class CybridProvider implements IFinancialProvider {
 
     if (params.identificationValue) {
       body.identification_numbers = [{
-        type: (params.identificationType as any) || 'tax_identification_number',
+        type: params.identificationType || 'tax_identification_number',
         identification_value: params.identificationValue,
       }];
     }
 
-    // In sandbox, request auto-pass behavior
     if (this.config.isSandbox) {
-      body.expected_behaviours = ['passed'];
+      body.expected_behaviours = ['passed_immediately'];
     }
 
     const resp = await this.http.post<CybridIdentityVerificationResponse>(
@@ -203,6 +204,8 @@ export class CybridProvider implements IFinancialProvider {
     const body: CybridCreateDepositBankAccountRequest = {
       account_guid: params.accountGuid,
       type: params.type,
+      name: params.name,
+      customer_guid: params.customerGuid,
     };
 
     const resp = await this.http.post<CybridDepositBankAccountResponse>(
@@ -232,7 +235,6 @@ export class CybridProvider implements IFinancialProvider {
       asset: params.asset,
     };
 
-    // Plaid processor token path
     if (params.accountKind === 'plaid_processor_token') {
       body.plaid_processor_token = params.plaidProcessorToken;
       body.plaid_institution_id = params.plaidInstitutionId;
@@ -240,15 +242,13 @@ export class CybridProvider implements IFinancialProvider {
       body.plaid_account_name = params.plaidAccountName;
     }
 
-    // Raw routing details path
     if (params.accountKind === 'raw_routing_details') {
-      body.routing_number_type = params.routingNumberType;
-      body.routing_number = params.routingNumber;
-      body.account_number = params.accountNumber;
-    }
-
-    if (params.counterpartyGuid) {
       body.counterparty_guid = params.counterpartyGuid;
+      body.counterparty_bank_account = {
+        routing_number_type: params.routingNumberType || 'ABA',
+        routing_number: params.routingNumber,
+        account_number: params.accountNumber,
+      };
     }
 
     const resp = await this.http.post<CybridExternalBankAccountResponse>(
@@ -291,28 +291,19 @@ export class CybridProvider implements IFinancialProvider {
         last: params.name.last,
         full: params.name.full,
       },
+      address: {
+        street: params.address.street || '123 Market St',
+        street2: params.address.street2,
+        city: params.address.city || 'San Francisco',
+        subdivision: params.address.subdivision || 'CA',
+        postal_code: params.address.postalCode || '94105',
+        country_code: params.address.countryCode || 'US',
+      },
     };
 
-    if (params.address) {
-      body.address = {
-        street: params.address.street,
-        street2: params.address.street2,
-        city: params.address.city,
-        subdivision: params.address.subdivision,
-        postal_code: params.address.postalCode,
-        country_code: params.address.countryCode,
-      };
-    }
-
-    if (params.dateOfBirth) {
-      body.date_of_birth = params.dateOfBirth;
-    }
-    if (params.email) {
-      body.email_address = params.email;
-    }
-    if (params.phone) {
-      body.phone_number = params.phone;
-    }
+    if (params.dateOfBirth) body.date_of_birth = params.dateOfBirth;
+    if (params.email) body.email_address = params.email;
+    if (params.phone) body.phone_number = params.phone;
 
     const resp = await this.http.post<CybridCounterpartyResponse>(
       '/api/counterparties',
@@ -348,6 +339,7 @@ export class CybridProvider implements IFinancialProvider {
       side: params.side,
       receive_amount: params.receiveAmount,
       deliver_amount: params.deliverAmount,
+      payment_rail: params.paymentRail,
     };
 
     const resp = await this.http.post<CybridQuoteResponse>(
@@ -371,24 +363,12 @@ export class CybridProvider implements IFinancialProvider {
     const body: CybridCreateTransferRequest = {
       quote_guid: params.quoteGuid,
       transfer_type: params.transferType,
+      payment_rail: params.paymentRail,
       source_account_guid: params.sourceAccountGuid,
       destination_account_guid: params.destinationAccountGuid,
       external_bank_account_guid: params.externalBankAccountGuid,
+      beneficiary_memo: params.beneficiaryMemo,
     };
-
-    if (params.sourceParticipant) {
-      body.source_participant = {
-        type: params.sourceParticipant.type,
-        guid: params.sourceParticipant.guid,
-      };
-    }
-
-    if (params.destinationParticipant) {
-      body.destination_participant = {
-        type: params.destinationParticipant.type,
-        guid: params.destinationParticipant.guid,
-      };
-    }
 
     const resp = await this.http.post<CybridTransferResponse>(
       '/api/transfers',
@@ -428,6 +408,80 @@ export class CybridProvider implements IFinancialProvider {
     return this.mapTradeResponse(resp);
   }
 
+  // ─── Plans & Executions (Remittance) ────────────────────────────
+
+  async createPlan(params: CreatePlanParams): Promise<PlanResponse> {
+    const body: CybridCreatePlanRequest = {
+      type: params.type,
+      customer_guid: params.customerGuid,
+      source_account: params.sourceAccount,
+      destination_account: params.destinationAccount,
+      purpose_of_transaction: params.purposeOfTransaction || 'salary_payment',
+    };
+
+    const resp = await this.http.post<CybridPlanResponse>(
+      '/api/plans',
+      body,
+    );
+
+    return {
+      guid: resp.guid,
+      type: resp.type,
+      state: resp.state,
+      failureCode: resp.failure_code,
+      createdAt: resp.created_at,
+      expiresAt: resp.expires_at,
+    };
+  }
+
+  async getPlan(guid: string): Promise<PlanResponse> {
+    const resp = await this.http.get<CybridPlanResponse>(
+      `/api/plans/${guid}`,
+    );
+    return {
+      guid: resp.guid,
+      type: resp.type,
+      state: resp.state,
+      failureCode: resp.failure_code,
+      createdAt: resp.created_at,
+      expiresAt: resp.expires_at,
+    };
+  }
+
+  async createExecution(params: CreateExecutionParams): Promise<ExecutionResponse> {
+    const body: CybridCreateExecutionRequest = {
+      plan_guid: params.planGuid,
+    };
+
+    const resp = await this.http.post<CybridExecutionResponse>(
+      '/api/executions',
+      body,
+    );
+
+    return {
+      guid: resp.guid,
+      planGuid: resp.plan_guid,
+      type: resp.type,
+      state: resp.state,
+      failureCode: resp.failure_code,
+      createdAt: resp.created_at,
+    };
+  }
+
+  async getExecution(guid: string): Promise<ExecutionResponse> {
+    const resp = await this.http.get<CybridExecutionResponse>(
+      `/api/executions/${guid}`,
+    );
+    return {
+      guid: resp.guid,
+      planGuid: resp.plan_guid,
+      type: resp.type,
+      state: resp.state,
+      failureCode: resp.failure_code,
+      createdAt: resp.created_at,
+    };
+  }
+
   // ─── Workflows ───────────────────────────────────────────────
 
   async createWorkflow(params: CreateWorkflowParams): Promise<WorkflowResponse> {
@@ -437,6 +491,7 @@ export class CybridProvider implements IFinancialProvider {
       external_bank_account_guid: params.externalBankAccountGuid,
       kind: params.kind,
       language: params.language,
+      link_customization_name: params.linkCustomizationName,
       redirect_uri: params.redirectUri,
     };
 
@@ -479,7 +534,7 @@ export class CybridProvider implements IFinancialProvider {
     }
   }
 
-  // ─── Response Mappers (snake_case → camelCase) ───────────────
+  // ─── Response Mappers ────────────────────────────────────────
 
   private mapCustomerResponse(r: CybridCustomerResponse): CustomerResponse {
     return {
@@ -527,6 +582,7 @@ export class CybridProvider implements IFinancialProvider {
     return {
       guid: r.guid,
       accountGuid: r.account_guid,
+      customerGuid: r.customer_guid,
       state: r.state,
       uniqueMemoId: r.unique_memo_id,
       routingNumberType: r.routing_number_type,

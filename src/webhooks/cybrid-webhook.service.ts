@@ -63,6 +63,8 @@ export class CybridWebhookService {
         await this.handleTradeEvent(event);
       } else if (eventType.startsWith('identity_verification.')) {
         await this.handleIdentityVerificationEvent(event);
+      } else if (eventType.startsWith('customer.')) {
+        await this.handleCustomerEvent(event);
       } else {
         this.logger.debug(`Unhandled event type ${eventType}`);
       }
@@ -222,6 +224,37 @@ export class CybridWebhookService {
         entityType: 'CybridCustomer',
         entityId: customer.id,
         details: { verificationGuid, outcome, kybStatus: status },
+      });
+    }
+  }
+
+  private async handleCustomerEvent(event: any) {
+    const customerGuid = event.object_guid || event.guid;
+    const state = event.state || event.status; // 'verified', 'unverified', 'rejected'
+
+    const customer = await this.prisma.cybridCustomer.findUnique({
+      where: { cybridCustomerGuid: customerGuid },
+    });
+
+    if (customer) {
+      const kybStatus = state === 'verified' ? 'approved' : (state === 'rejected' ? 'rejected' : 'pending');
+      await this.prisma.cybridCustomer.update({
+        where: { id: customer.id },
+        data: { kybStatus },
+      });
+      await this.prisma.user.update({
+        where: { id: customer.userId },
+        data: { kybStatus },
+      });
+      if (state === 'verified') {
+        await this.accountService.ensureDepositBankAccount(customer.userId);
+      }
+      await this.auditLogsService.log({
+        userId: customer.userId,
+        action: `CYBRID_CUSTOMER_STATE_${state.toUpperCase()}`,
+        entityType: 'CybridCustomer',
+        entityId: customer.id,
+        details: { customerGuid, state, kybStatus },
       });
     }
   }

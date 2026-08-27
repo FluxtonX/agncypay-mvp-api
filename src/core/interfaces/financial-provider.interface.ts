@@ -1,9 +1,7 @@
 /**
  * Provider-neutral Financial Provider Interface
  *
- * Designed around the Cybrid API surface but kept provider-agnostic
- * so a future provider swap does not require rewriting business logic.
- *
+ * Designed and verified against the official Cybrid OpenAPI specifications.
  * Every method returns typed response objects — never raw HTTP responses.
  */
 
@@ -12,7 +10,7 @@
 export interface CreateBusinessCustomerParams {
   name: string;
   type: 'business' | 'individual';
-  bankGuid: string;
+  bankGuid?: string;
   email?: string;
   phone?: string;
   metadata?: Record<string, any>;
@@ -23,7 +21,7 @@ export interface CustomerResponse {
   name: string;
   type: string;
   state: string;
-  bankGuid: string;
+  bankGuid?: string;
   createdAt: string;
 }
 
@@ -32,7 +30,14 @@ export interface CustomerResponse {
 export interface CreateIdentityVerificationParams {
   customerGuid: string;
   type: 'kyc' | 'bank_account' | 'counterparty';
-  method: 'business_registration' | 'id_and_selfie' | 'attested' | 'plaid_identity_match';
+  method:
+    | 'business_registration'
+    | 'id_and_selfie'
+    | 'attested'
+    | 'attested_business_registration'
+    | 'plaid_identity_match'
+    | 'tax_id_and_regex'
+    | 'bank_account';
   countryCode?: string;
   name?: {
     first: string;
@@ -46,7 +51,7 @@ export interface CreateIdentityVerificationParams {
     countryCode: string;
   };
   dateOfBirth?: string;
-  identificationType?: string;
+  identificationType?: 'social_security_number' | 'tax_identification_number' | 'passport_number' | 'drivers_license';
   identificationValue?: string;
 }
 
@@ -65,9 +70,9 @@ export interface IdentityVerificationResponse {
 
 export interface CreateAccountParams {
   customerGuid?: string; // omit for bank-owned accounts
-  type: 'trading' | 'fiat' | 'fee' | 'gas' | 'reserve';
+  type: 'trading' | 'fiat' | 'invoice_operations' | 'storage';
   asset: string; // e.g. 'USD', 'USDC'
-  name?: string;
+  name: string;
 }
 
 export interface AccountResponse {
@@ -75,7 +80,7 @@ export interface AccountResponse {
   customerGuid?: string;
   type: string;
   asset: string;
-  name?: string;
+  name: string;
   state: string;
   platformBalance?: string;
   platformAvailable?: string;
@@ -86,12 +91,15 @@ export interface AccountResponse {
 
 export interface CreateDepositBankAccountParams {
   accountGuid: string;
-  type?: string;
+  type: 'main' | 'sub_account';
+  customerGuid?: string;
+  name?: string;
 }
 
 export interface DepositBankAccountResponse {
   guid: string;
   accountGuid: string;
+  customerGuid?: string;
   state: string;
   uniqueMemoId?: string;
   routingNumberType?: string;
@@ -106,19 +114,19 @@ export interface DepositBankAccountResponse {
 
 export interface CreateExternalBankAccountParams {
   name: string;
-  customerGuid?: string;
-  asset: string;
   accountKind: 'plaid' | 'plaid_processor_token' | 'raw_routing_details';
+  customerGuid?: string;
+  asset?: string;
   // For plaid_processor_token
   plaidProcessorToken?: string;
   plaidInstitutionId?: string;
   plaidAccountMask?: string;
   plaidAccountName?: string;
   // For raw_routing_details
-  routingNumberType?: string;
+  counterpartyGuid?: string;
+  routingNumberType?: 'CPA' | 'ABA' | 'IFSC';
   routingNumber?: string;
   accountNumber?: string;
-  counterpartyGuid?: string;
 }
 
 export interface ExternalBankAccountResponse {
@@ -145,7 +153,7 @@ export interface CreateCounterpartyParams {
     last?: string;
     full?: string;
   };
-  address?: {
+  address: {
     street: string;
     street2?: string;
     city: string;
@@ -174,10 +182,11 @@ export interface CreateQuoteParams {
   customerGuid: string;
   productType: 'trading' | 'funding' | 'book_transfer' | 'crypto_transfer';
   asset?: string;
-  side?: 'buy' | 'sell';
-  receiveAmount?: string;
-  deliverAmount?: string;
+  side?: 'deposit' | 'withdrawal' | 'buy' | 'sell';
+  receiveAmount?: number; // integer (minor units / cents)
+  deliverAmount?: number; // integer (minor units / cents)
   networkAddress?: string;
+  paymentRail?: 'ach' | 'eft' | 'wire' | 'rtp' | 'etransfer';
 }
 
 export interface QuoteResponse {
@@ -186,9 +195,9 @@ export interface QuoteResponse {
   productType: string;
   side?: string;
   asset?: string;
-  receiveAmount?: string;
-  deliverAmount?: string;
-  fee?: string;
+  receiveAmount?: number;
+  deliverAmount?: number;
+  fee?: number;
   issuedAt: string;
   expiresAt: string;
   createdAt: string;
@@ -198,18 +207,12 @@ export interface QuoteResponse {
 
 export interface CreateTransferParams {
   quoteGuid: string;
-  transferType: 'funding' | 'book' | 'crypto' | 'instant_funding' | 'lightning';
+  transferType: 'funding' | 'crypto' | 'instant_funding' | 'inter_account' | 'lightning' | 'book';
+  paymentRail?: 'ach' | 'eft' | 'wire' | 'rtp' | 'etransfer';
   sourceAccountGuid?: string;
-  sourceParticipant?: {
-    type: string;
-    guid: string;
-  };
   destinationAccountGuid?: string;
-  destinationParticipant?: {
-    type: string;
-    guid: string;
-  };
   externalBankAccountGuid?: string;
+  beneficiaryMemo?: string;
   labels?: string[];
 }
 
@@ -222,9 +225,9 @@ export interface TransferResponse {
   destinationAccountGuid?: string;
   externalBankAccountGuid?: string;
   state: string;
-  amount?: string;
-  fee?: string;
-  estimatedAmount?: string;
+  amount?: number;
+  fee?: number;
+  estimatedAmount?: number;
   failureCode?: string;
   createdAt: string;
   updatedAt?: string;
@@ -234,7 +237,7 @@ export interface TransferResponse {
 
 export interface CreateTradeParams {
   quoteGuid: string;
-  expectedError?: string;
+  expectedError?: 'expired_quote' | 'non_sufficient_funds';
   labels?: string[];
 }
 
@@ -244,25 +247,62 @@ export interface TradeResponse {
   customerGuid?: string;
   side?: string;
   symbol?: string;
-  receiveAmount?: string;
-  deliverAmount?: string;
-  fee?: string;
+  receiveAmount?: number;
+  deliverAmount?: number;
+  fee?: number;
   state: string;
   failureCode?: string;
   createdAt: string;
 }
 
-// ─── Workflows (for Plaid exchange / external bank linking) ─────
+// ─── Plans & Executions (Remittance) ────────────────────────────
+
+export interface CreatePlanParams {
+  type: 'remittance' | 'disbursement' | 'invoice_pay';
+  customerGuid: string;
+  sourceAccount: {
+    type: 'customer' | 'bank';
+    guid: string;
+  };
+  destinationAccount: {
+    type: 'customer' | 'bank';
+    guid: string;
+  };
+  purposeOfTransaction?: string;
+}
+
+export interface PlanResponse {
+  guid: string;
+  type: string;
+  state: string;
+  failureCode?: string;
+  createdAt: string;
+  expiresAt?: string;
+}
+
+export interface CreateExecutionParams {
+  planGuid: string;
+}
+
+export interface ExecutionResponse {
+  guid: string;
+  planGuid: string;
+  type: string;
+  state: string;
+  failureCode?: string;
+  createdAt: string;
+}
+
+// ─── Workflows ──────────────────────────────────────────────────
 
 export interface CreateWorkflowParams {
   type: 'plaid';
   customerGuid?: string;
   externalBankAccountGuid?: string;
-  kind?: string;
-  language?: string;
+  kind?: 'link_token_create' | 'link_token_update';
+  language?: 'en' | 'fr' | 'es' | 'nl' | 'de';
   linkCustomizationName?: string;
   redirectUri?: string;
-  androidPackageName?: string;
 }
 
 export interface WorkflowResponse {
@@ -276,55 +316,49 @@ export interface WorkflowResponse {
   createdAt: string;
 }
 
-// ─── Provider Interface ─────────────────────────────────────────
+// ─── Financial Provider Contract ────────────────────────────────
 
 export interface IFinancialProvider {
-  // Authentication
   authenticate(): Promise<string>;
 
-  // Customers
   createCustomer(params: CreateBusinessCustomerParams): Promise<CustomerResponse>;
   getCustomer(guid: string): Promise<CustomerResponse>;
 
-  // Identity Verification (KYB)
   createIdentityVerification(params: CreateIdentityVerificationParams): Promise<IdentityVerificationResponse>;
   getIdentityVerification(guid: string): Promise<IdentityVerificationResponse>;
 
-  // Accounts
   createAccount(params: CreateAccountParams): Promise<AccountResponse>;
   getAccount(guid: string): Promise<AccountResponse>;
   listAccounts(params?: { customerGuid?: string; type?: string }): Promise<AccountResponse[]>;
 
-  // Deposit Bank Accounts
   createDepositBankAccount(params: CreateDepositBankAccountParams): Promise<DepositBankAccountResponse>;
   getDepositBankAccount(guid: string): Promise<DepositBankAccountResponse>;
 
-  // External Bank Accounts
   createExternalBankAccount(params: CreateExternalBankAccountParams): Promise<ExternalBankAccountResponse>;
   getExternalBankAccount(guid: string): Promise<ExternalBankAccountResponse>;
   listExternalBankAccounts(params?: { customerGuid?: string }): Promise<ExternalBankAccountResponse[]>;
 
-  // Counterparties
   createCounterparty(params: CreateCounterpartyParams): Promise<CounterpartyResponse>;
   getCounterparty(guid: string): Promise<CounterpartyResponse>;
   listCounterparties(customerGuid: string): Promise<CounterpartyResponse[]>;
 
-  // Quotes
   createQuote(params: CreateQuoteParams): Promise<QuoteResponse>;
   getQuote(guid: string): Promise<QuoteResponse>;
 
-  // Transfers
   createTransfer(params: CreateTransferParams): Promise<TransferResponse>;
   getTransfer(guid: string): Promise<TransferResponse>;
 
-  // Trades
   createTrade(params: CreateTradeParams): Promise<TradeResponse>;
   getTrade(guid: string): Promise<TradeResponse>;
 
-  // Workflows
+  createPlan(params: CreatePlanParams): Promise<PlanResponse>;
+  getPlan(guid: string): Promise<PlanResponse>;
+
+  createExecution(params: CreateExecutionParams): Promise<ExecutionResponse>;
+  getExecution(guid: string): Promise<ExecutionResponse>;
+
   createWorkflow(params: CreateWorkflowParams): Promise<WorkflowResponse>;
   getWorkflow(guid: string): Promise<WorkflowResponse>;
 
-  // Webhook Signature Verification
   verifyWebhookSignature(payload: string, signature: string): boolean;
 }

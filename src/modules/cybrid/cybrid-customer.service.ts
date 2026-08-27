@@ -45,6 +45,18 @@ export class CybridCustomerService {
         });
         customerGuid = response.guid;
         customerState = response.state;
+
+        // If newly created customer is in 'storing' state, poll until ready
+        if (customerState === 'storing') {
+          for (let i = 0; i < 5; i++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            try {
+              const check = await this.cybridProvider.getCustomer(customerGuid);
+              customerState = check.state;
+              if (customerState !== 'storing') break;
+            } catch (_) {}
+          }
+        }
       } else {
         customerGuid = `cust_cyb_${Date.now()}`;
         customerState = 'unverified';
@@ -60,7 +72,7 @@ export class CybridCustomerService {
         userId,
         cybridCustomerGuid: customerGuid,
         customerType: 'business',
-        kybStatus: 'not_started',
+        kybStatus: customerState === 'verified' ? 'approved' : 'not_started',
         cybridBankGuid: this.config.bankGuid || 'bank_sandbox',
       },
     });
@@ -98,46 +110,73 @@ export class CybridCustomerService {
     let verificationState = 'waiting';
     let outcome: string | undefined = undefined;
 
+    const normalizeCountry = (c?: string) => {
+      if (!c) return 'US';
+      const clean = c.trim().toUpperCase();
+      if (clean === 'UNITED STATES' || clean === 'USA' || clean === 'US') return 'US';
+      if (clean === 'CANADA' || clean === 'CA') return 'CA';
+      if (clean === 'UNITED KINGDOM' || clean === 'UK' || clean === 'GB') return 'GB';
+      return clean.length === 2 ? clean : 'US';
+    };
+    const countryCode = normalizeCountry(bp?.country);
+
     try {
       if (this.config.isConfigured) {
         const verification = await this.cybridProvider.createIdentityVerification({
           customerGuid: customer.cybridCustomerGuid,
           type: 'kyc',
           method: 'business_registration',
-          countryCode: bp?.country || 'US',
+          countryCode: countryCode,
           name: {
             first: rep?.fullName?.split(' ')[0] || 'Business',
             last: rep?.fullName?.split(' ').slice(1).join(' ') || 'Owner',
           },
           address: {
-            street: bp?.addressLine1 || bp?.address || '123 Market St',
+            street: bp?.addressLine1 || bp?.address || '100 Pine Street, Suite 2400',
             city: bp?.city || 'San Francisco',
             subdivision: bp?.businessState || bp?.stateOrProvince || 'CA',
-            postalCode: bp?.zipCode || bp?.postalCode || '94105',
-            countryCode: bp?.country || 'US',
+            postalCode: bp?.zipCode || bp?.postalCode || '94111',
+            countryCode: countryCode,
           },
-          dateOfBirth: rep?.dob || '1985-05-15',
+          dateOfBirth: rep?.dob || '1988-04-12',
           identificationType: 'tax_identification_number',
-          identificationValue: bp?.taxId || bp?.registrationNumber || '123456789',
+          identificationValue: bp?.taxId || bp?.registrationNumber || '12-3456789',
         });
 
         verificationGuid = verification.guid;
         verificationState = verification.state;
         outcome = verification.outcome;
+
+        // Allow Cybrid sandbox to process verification and query live state
+        await new Promise((r) => setTimeout(r, 1000));
+        let liveCybridState = 'unverified';
+        try {
+          const cybridCheck = await this.cybridProvider.getCustomer(customer.cybridCustomerGuid);
+          liveCybridState = cybridCheck.state;
+          if (liveCybridState === 'verified') {
+            verificationState = 'completed';
+            outcome = 'passed';
+          }
+        } catch (_) {}
       } else {
         verificationGuid = `ver_cyb_${Date.now()}`;
-        verificationState = 'completed';
-        outcome = 'passed';
+        verificationState = 'waiting';
+        outcome = 'pending';
       }
     } catch (err) {
-      this.logger.warn(`Cybrid KYB API call failed, using sandbox fallback: ${err.message}`);
+      this.logger.warn(`Cybrid KYB API call failed: ${err.message}`);
       verificationGuid = `ver_cyb_${Date.now()}`;
-      verificationState = 'completed';
-      outcome = 'passed';
+      verificationState = 'waiting';
+      outcome = 'pending';
     }
 
-    const isApproved = verificationState === 'completed' && outcome === 'passed';
-    const newKybStatus = isApproved ? 'approved' : 'pending';
+    // Strictly sync status with Cybrid live state
+    let newKybStatus = 'pending';
+    if (verificationState === 'completed' && outcome === 'passed') {
+      newKybStatus = 'approved';
+    } else if (outcome === 'failed' || verificationState === 'rejected') {
+      newKybStatus = 'rejected';
+    }
 
     const updatedCustomer = await this.prisma.cybridCustomer.update({
       where: { id: customer.id },
@@ -151,7 +190,7 @@ export class CybridCustomerService {
     await this.prisma.user.update({
       where: { id: userId },
       data: {
-        kybStatus: isApproved ? 'approved' : 'pending',
+        kybStatus: newKybStatus,
       },
     });
 

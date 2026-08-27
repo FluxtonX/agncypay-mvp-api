@@ -67,6 +67,13 @@ export class TalentService {
             last: lastName,
             full: data.fullName,
           },
+          address: {
+            street: '123 Talent Way',
+            city: 'San Francisco',
+            subdivision: 'CA',
+            postalCode: '94105',
+            countryCode: data.country || 'US',
+          },
           email: data.email,
           phone: data.phone,
         });

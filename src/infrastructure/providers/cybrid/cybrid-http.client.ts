@@ -66,7 +66,7 @@ export class CybridHttpClient {
           grant_type: 'client_credentials',
           client_id: this.config.clientId,
           client_secret: this.config.clientSecret,
-          scope: 'banks:read banks:write customers:read customers:write accounts:read accounts:write prices:read quotes:execute trades:execute trades:read transfers:execute transfers:read external_bank_accounts:execute external_bank_accounts:read workflows:execute workflows:read counterparties:read counterparties:write deposit_bank_accounts:execute deposit_bank_accounts:read identity_verifications:execute identity_verifications:read',
+          scope: 'customers:read customers:execute accounts:read accounts:execute quotes:read quotes:execute trades:read trades:execute transfers:read transfers:execute external_bank_accounts:read external_bank_accounts:execute workflows:read workflows:execute counterparties:read counterparties:execute deposit_bank_accounts:read deposit_bank_accounts:execute identity_verifications:read identity_verifications:execute prices:read banks:read',
         },
       );
 

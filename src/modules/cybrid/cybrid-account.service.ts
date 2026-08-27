@@ -149,6 +149,8 @@ export class CybridAccountService {
       if (this.config.isConfigured) {
         const resp = await this.cybridProvider.createDepositBankAccount({
           accountGuid: fiatAccount.cybridAccountGuid,
+          type: 'main',
+          name: 'Agency Inbound Deposit Account',
         });
         depGuid = resp.guid;
         routing = resp.routingNumber || routing;
