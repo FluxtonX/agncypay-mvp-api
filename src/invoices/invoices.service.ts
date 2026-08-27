@@ -1,8 +1,7 @@
-import { Injectable, NotFoundException, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InvoiceRepository } from '../infrastructure/database/repositories/invoice.repository';
 import { UserRepository } from '../infrastructure/database/repositories/user.repository';
-import { ModernTreasuryProvider } from '../infrastructure/providers/modern-treasury/modern-treasury.provider';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
 import { WalletsService } from '../modules/wallets/wallets.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -15,7 +14,6 @@ export class InvoicesService {
   constructor(
     private readonly invoiceRepo: InvoiceRepository,
     private readonly userRepo: UserRepository,
-    private readonly modernTreasuryProvider: ModernTreasuryProvider,
     private readonly auditLogsService: AuditLogsService,
     private readonly walletsService: WalletsService,
     private readonly prisma: PrismaService,
@@ -133,37 +131,18 @@ export class InvoicesService {
       details: { previousStatus: invoice.status, newStatus: status, payoutStatus: updated.payoutStatus },
     });
 
-    // Handle Modern Treasury ACH Payment Execution and Wallet Ledger entry if marked paid or processing
+    // Handle internal double-entry wallet ledger entry if marked paid
     if (status === 'paid' && invoice.status !== 'paid') {
-      const brandUser = await this.prisma.user.findUnique({ where: { id: invoice.brandId } });
-      const agencyUser = await this.prisma.user.findUnique({ where: { id: invoice.agencyId } });
-      const recipientBank = await this.prisma.bankDetails.findUnique({
-        where: { userId: invoice.agencyId },
-      });
-
-      const achResponse = await this.modernTreasuryProvider.processACHPayment({
-        invoiceId: invoice.id,
-        amount: invoice.amount,
-        currency: 'USD',
-        payerUserId: invoice.brandId,
-        recipientUserId: invoice.agencyId,
-        originatingAccountId: brandUser?.modernTreasuryCounterpartyId || undefined,
-        receivingAccountId: agencyUser?.modernTreasuryInternalAccountId || undefined,
-        accountNumber: recipientBank?.accountNumber,
-        routingNumber: recipientBank?.routingNumber,
-      });
-
       const brandWallet = await this.walletsService.getOrCreateWalletForUser(invoice.brandId, 'brand');
       const agencyWallet = await this.walletsService.getOrCreateWalletForUser(invoice.agencyId, 'agency');
 
-      // Double-entry ledger reference
       await this.walletsService.recordTransaction({
         walletId: brandWallet.walletId,
         type: 'debit',
         amount: invoice.amount,
         referenceType: 'INVOICE_PAYMENT',
         referenceId: invoice.id,
-        description: `ACH Payment for Invoice ${invoice.invoiceNumber}`,
+        description: `Payment for Invoice ${invoice.invoiceNumber}`,
       });
 
       await this.walletsService.recordTransaction({
@@ -172,203 +151,24 @@ export class InvoicesService {
         amount: invoice.amount,
         referenceType: 'INVOICE_PAYMENT',
         referenceId: invoice.id,
-        description: `ACH Settlement received for Invoice ${invoice.invoiceNumber}`,
+        description: `Settlement received for Invoice ${invoice.invoiceNumber}`,
       });
 
       await this.auditLogsService.log({
         userId: invoice.brandId,
-        action: 'ACH_PAYMENT_INITIATED',
+        action: 'PAYMENT_INITIATED',
         entityType: 'Invoice',
         entityId: invoice.id,
-        details: achResponse,
+        details: { amount: invoice.amount },
       });
 
-      this.eventEmitter.emit('invoice.paid', { invoice: updated, achResponse });
+      this.eventEmitter.emit('invoice.paid', { invoice: updated });
     }
 
     return updated;
-  }
-
-  async handleModernTreasuryWebhook(eventPayload: any, rawBody: string, signature: string) {
-    const isValid = this.modernTreasuryProvider.verifyWebhookSignature(rawBody, signature);
-    if (!isValid) {
-      this.logger.warn('Rejected Modern Treasury webhook: Invalid signature');
-      throw new UnauthorizedException('Invalid Modern Treasury webhook signature');
-    }
-
-    const eventId = eventPayload?.id || eventPayload?.event_id || `evt_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    const eventType = eventPayload?.event || eventPayload?.type;
-    const data = eventPayload?.data || eventPayload;
-
-    // Webhook Idempotency Check
-    const existingEvent = await this.prisma.webhookEvent.findUnique({ where: { eventId } });
-    if (existingEvent) {
-      this.logger.log(`Ignoring duplicate Modern Treasury webhook event ID: ${eventId}`);
-      return { status: 'acknowledged', reason: 'Duplicate event' };
-    }
-
-    await this.prisma.webhookEvent.create({
-      data: {
-        eventId,
-        eventType: eventType || 'unknown',
-        status: 'processed',
-        payload: eventPayload,
-      },
-    });
-
-    const invoiceId = data?.metadata?.invoiceId || data?.payment_order?.metadata?.invoiceId;
-    const payoutId = data?.metadata?.payoutId || data?.payment_order?.metadata?.payoutId;
-
-    this.logger.log(`Processing Modern Treasury webhook event: ${eventType} (Invoice: ${invoiceId || 'N/A'}, Payout: ${payoutId || 'N/A'})`);
-
-    if (payoutId) {
-      const payout = await this.prisma.payout.findUnique({ where: { id: payoutId } });
-      if (payout) {
-        if (eventType === 'payment_order.completed') {
-          await this.prisma.payout.update({ where: { id: payoutId }, data: { status: 'disbursed' } });
-        } else if (eventType === 'payment_order.failed' || eventType === 'payment_order.denied') {
-          await this.prisma.payout.update({ where: { id: payoutId }, data: { status: 'failed' } });
-        } else if (eventType === 'payment_order.returned') {
-          await this.prisma.payout.update({ where: { id: payoutId }, data: { status: 'returned' } });
-        }
-      }
-    }
-
-    if (!invoiceId) {
-      await this.auditLogsService.log({
-        action: 'MODERN_TREASURY_WEBHOOK_RECEIVED',
-        entityType: 'WebhookEvent',
-        entityId: eventId,
-        details: { eventType, unmapped: true, payload: data },
-      });
-      return { status: 'acknowledged', reason: 'No invoiceId in metadata' };
-    }
-
-    const invoice = await this.invoiceRepo.findById(invoiceId);
-    if (!invoice) {
-      this.logger.warn(`Webhook invoice not found: ${invoiceId}`);
-      return { status: 'acknowledged', reason: `Invoice ${invoiceId} not found` };
-    }
-
-    switch (eventType) {
-      case 'payment_order.completed': {
-        if (invoice.status !== 'paid') {
-          await this.invoiceRepo.update(invoice.id, {
-            status: 'paid',
-            payoutStatus: 'disbursed',
-          });
-
-          const brandWallet = await this.walletsService.getOrCreateWalletForUser(invoice.brandId, 'brand');
-          const agencyWallet = await this.walletsService.getOrCreateWalletForUser(invoice.agencyId, 'agency');
-
-          await this.walletsService.recordTransaction({
-            walletId: brandWallet.walletId,
-            type: 'debit',
-            amount: invoice.amount,
-            referenceType: 'INVOICE_PAYMENT_SETTLED',
-            referenceId: invoice.id,
-            description: `Settled ACH Payment for Invoice ${invoice.invoiceNumber}`,
-          });
-
-          await this.walletsService.recordTransaction({
-            walletId: agencyWallet.walletId,
-            type: 'credit',
-            amount: invoice.amount,
-            referenceType: 'INVOICE_PAYMENT_SETTLED',
-            referenceId: invoice.id,
-            description: `Settled ACH Disbursement for Invoice ${invoice.invoiceNumber}`,
-          });
-
-          await this.auditLogsService.log({
-            userId: invoice.brandId,
-            action: 'ACH_PAYMENT_COMPLETED',
-            entityType: 'Invoice',
-            entityId: invoice.id,
-            details: { webhookEvent: eventType, data },
-          });
-
-          this.eventEmitter.emit('invoice.paid', { invoice, data });
-        }
-        break;
-      }
-
-      case 'payment_order.failed':
-      case 'payment_order.denied': {
-        await this.invoiceRepo.update(invoice.id, {
-          status: 'pending',
-          payoutStatus: 'pending',
-        });
-
-        await this.auditLogsService.log({
-          userId: invoice.brandId,
-          action: 'ACH_PAYMENT_FAILED',
-          entityType: 'Invoice',
-          entityId: invoice.id,
-          details: { webhookEvent: eventType, data },
-        });
-
-        this.eventEmitter.emit('invoice.payment_failed', { invoice, data });
-        break;
-      }
-
-      case 'payment_order.returned': {
-        await this.invoiceRepo.update(invoice.id, {
-          status: 'overdue',
-          payoutStatus: 'pending',
-        });
-
-        const agencyWallet = await this.walletsService.getOrCreateWalletForUser(invoice.agencyId, 'agency');
-        const brandWallet = await this.walletsService.getOrCreateWalletForUser(invoice.brandId, 'brand');
-
-        // Reverse ledger entries if returned after initial credit
-        await this.walletsService.recordTransaction({
-          walletId: agencyWallet.walletId,
-          type: 'debit',
-          amount: invoice.amount,
-          referenceType: 'INVOICE_PAYMENT_RETURNED',
-          referenceId: invoice.id,
-          description: `ACH Return reversal for Invoice ${invoice.invoiceNumber}`,
-        });
-
-        await this.walletsService.recordTransaction({
-          walletId: brandWallet.walletId,
-          type: 'credit',
-          amount: invoice.amount,
-          referenceType: 'INVOICE_PAYMENT_RETURNED',
-          referenceId: invoice.id,
-          description: `ACH Return refund credit for Invoice ${invoice.invoiceNumber}`,
-        });
-
-        await this.auditLogsService.log({
-          userId: invoice.brandId,
-          action: 'ACH_PAYMENT_RETURNED',
-          entityType: 'Invoice',
-          entityId: invoice.id,
-          details: { webhookEvent: eventType, data },
-        });
-
-        this.eventEmitter.emit('invoice.payment_returned', { invoice, data });
-        break;
-      }
-
-      default: {
-        this.logger.log(`Received unhandled Modern Treasury event: ${eventType}`);
-        await this.auditLogsService.log({
-          action: 'MODERN_TREASURY_WEBHOOK_RECEIVED',
-          entityType: 'Invoice',
-          entityId: invoice.id,
-          details: { eventType, data },
-        });
-        break;
-      }
-    }
-
-    return { status: 'success', eventType, invoiceId: invoice.id };
   }
 
   async getBrands() {
     return this.userRepo.findMany({ accountType: 'brand' });
   }
 }
-
-

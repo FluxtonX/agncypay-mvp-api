@@ -32,7 +32,7 @@ export class VerificationController {
     return this.verificationService.exchangePlaidPublicToken(userId, publicToken);
   }
 
-  @ApiOperation({ summary: 'Create Plaid processor token for ACH payment gateways (e.g. Modern Treasury)' })
+  @ApiOperation({ summary: 'Create Plaid processor token for ACH payment gateways' })
   @Post('plaid/processor-token')
   async createPlaidProcessorToken(
     @CurrentUser('id') userId: string,
@@ -65,13 +65,13 @@ export class VerificationController {
     return this.verificationService.updateBankDetails(userId, data);
   }
 
-  @ApiOperation({ summary: 'Submit Agency Legal Entity info to Modern Treasury for KYB' })
+  @ApiOperation({ summary: 'Submit Agency Legal Entity info for KYB verification' })
   @Post('legal-entity')
   async submitLegalEntity(@CurrentUser('id') userId: string) {
-    return this.verificationService.submitLegalEntityToModernTreasury(userId);
+    return this.verificationService.submitLegalEntity(userId);
   }
 
-  @ApiOperation({ summary: 'Setup Brand funding account as Modern Treasury External Account' })
+  @ApiOperation({ summary: 'Setup Brand funding account' })
   @Post('brand/funding-account')
   async setupBrandFundingAccount(
     @CurrentUser('id') userId: string,

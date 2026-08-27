@@ -19,6 +19,13 @@ import { QuickBooksModule } from './modules/quickbooks/quickbooks.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { PayoutsModule } from './payouts/payouts.module';
 
+// Cybrid MVP Modules
+import { CybridModule } from './infrastructure/providers/cybrid/cybrid.module';
+import { LedgerModule } from './modules/ledger/ledger.module';
+import { TalentModule } from './talents/talent.module';
+import { PaymentModule } from './modules/payments/payment.module';
+import { ReconciliationModule } from './modules/reconciliation/reconciliation.module';
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -28,8 +35,13 @@ import { PayoutsModule } from './payouts/payouts.module';
     FeatureFlagsModule,
     WalletsModule,
     QuickBooksModule,
-    WebhooksModule,
+    CybridModule,
+    LedgerModule,
+    TalentModule,
+    PaymentModule,
     PayoutsModule,
+    WebhooksModule,
+    ReconciliationModule,
     AuthModule,
     UsersModule,
     WorkspacesModule,
@@ -43,6 +55,3 @@ import { PayoutsModule } from './payouts/payouts.module';
   providers: [AppService],
 })
 export class AppModule {}
-
-
-

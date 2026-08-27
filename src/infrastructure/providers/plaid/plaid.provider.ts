@@ -140,7 +140,7 @@ export class PlaidProvider implements IBankVerificationProvider {
     };
   }
 
-  async createProcessorToken(accessToken: string, accountId: string, processor = 'modern_treasury'): Promise<string> {
+  async createProcessorToken(accessToken: string, accountId: string, processor = 'cybrid'): Promise<string> {
     if (!this.client || accessToken.includes('simulated')) {
       return `processor-token-simulated-${Date.now()}`;
     }

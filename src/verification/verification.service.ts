@@ -1,28 +1,43 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
-import { ModernTreasuryProvider } from '../infrastructure/providers/modern-treasury/modern-treasury.provider';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
+import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
+import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
 
 @Injectable()
 export class VerificationService {
+  private readonly logger = new Logger(VerificationService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly plaidProvider: PlaidProvider,
-    private readonly modernTreasuryProvider: ModernTreasuryProvider,
     private readonly auditLogsService: AuditLogsService,
+    private readonly cybridCustomerService: CybridCustomerService,
+    private readonly cybridAccountService: CybridAccountService,
   ) {}
 
   async getVerificationState(userId: string) {
-    const [businessProfile, representative, authorization, brandVerification, bankDetails, documents] =
-      await Promise.all([
-        this.prisma.businessProfile.findUnique({ where: { userId } }),
-        this.prisma.representative.findUnique({ where: { userId } }),
-        this.prisma.authorization.findUnique({ where: { userId } }),
-        this.prisma.brandVerification.findUnique({ where: { userId } }),
-        this.prisma.bankDetails.findUnique({ where: { userId } }),
-        this.prisma.document.findMany({ where: { userId } }),
-      ]);
+    const [
+      businessProfile,
+      representative,
+      authorization,
+      brandVerification,
+      bankDetails,
+      documents,
+      cybridCustomer,
+    ] = await Promise.all([
+      this.prisma.businessProfile.findUnique({ where: { userId } }),
+      this.prisma.representative.findUnique({ where: { userId } }),
+      this.prisma.authorization.findUnique({ where: { userId } }),
+      this.prisma.brandVerification.findUnique({ where: { userId } }),
+      this.prisma.bankDetails.findUnique({ where: { userId } }),
+      this.prisma.document.findMany({ where: { userId } }),
+      this.prisma.cybridCustomer.findUnique({
+        where: { userId },
+        include: { accounts: { include: { depositBankAccounts: true } } },
+      }),
+    ]);
 
     return {
       businessProfile,
@@ -31,6 +46,7 @@ export class VerificationService {
       brandVerification,
       bankDetails,
       documents,
+      cybridCustomer,
     };
   }
 
@@ -118,86 +134,37 @@ export class VerificationService {
     return bank;
   }
 
-  async submitLegalEntityToModernTreasury(userId: string) {
+  async submitLegalEntity(userId: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new Error(`User ${userId} not found`);
     }
 
-    const businessProfile = await this.prisma.businessProfile.findUnique({ where: { userId } });
+    // 1. Create Cybrid Business Customer and trigger KYB
+    const kybResult = await this.cybridCustomerService.initiateKYB(userId);
 
-    const legalName = businessProfile?.legalName || user.fullName || 'Agency Legal Entity';
-
-    const leResult = await this.modernTreasuryProvider.createLegalEntity({
-      agencyId: userId,
-      legalName,
-      businessType: businessProfile?.businessType,
-      registrationNumber: businessProfile?.registrationNumber,
-      taxId: businessProfile?.taxId || undefined,
-      address: {
-        line1: businessProfile?.addressLine1,
-        line2: businessProfile?.addressLine2,
-        city: businessProfile?.city,
-        state: businessProfile?.businessState,
-        postalCode: businessProfile?.postalCode,
-        country: businessProfile?.country || 'USA',
-      },
-    });
-
-    const isApproved = leResult.status === 'approved';
-    let internalAccountId: string | undefined = user.modernTreasuryInternalAccountId || undefined;
-    let ledgerAccountId: string | undefined = user.modernTreasuryLedgerAccountId || undefined;
-    let counterpartyId: string | undefined = user.modernTreasuryCounterpartyId || undefined;
-
-    if (isApproved) {
-      if (!internalAccountId) {
-        const iaResult = await this.modernTreasuryProvider.createInternalAccount({
-          name: legalName,
-          legalEntityId: leResult.legalEntityId,
-        });
-        internalAccountId = iaResult.internalAccountId;
-        ledgerAccountId = iaResult.ledgerAccountId;
-      }
-
-      if (!counterpartyId) {
-        const cpResult = await this.modernTreasuryProvider.createCounterparty({
-          name: legalName,
-          metadata: { userId, accountType: user.accountType },
-        });
-        counterpartyId = cpResult.counterpartyId;
-      }
-    }
-
-    const updatedUser = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        modernTreasuryLegalEntityId: leResult.legalEntityId,
-        modernTreasuryInternalAccountId: internalAccountId,
-        modernTreasuryLedgerAccountId: ledgerAccountId,
-        modernTreasuryCounterpartyId: counterpartyId,
-        kybStatus: isApproved ? 'approved' : 'pending',
-      },
-    });
+    // 2. Automatically provision USD Fiat Account & Deposit Bank Account
+    const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(userId);
 
     await this.auditLogsService.log({
       userId,
-      action: 'LEGAL_ENTITY_SUBMITTED_MT',
+      action: 'CYBRID_ONBOARDING_COMPLETED',
       entityType: 'User',
       entityId: userId,
       details: {
-        legalEntityId: leResult.legalEntityId,
-        kybStatus: updatedUser.kybStatus,
-        internalAccountId,
-        counterpartyId,
+        customerGuid: kybResult.customer.cybridCustomerGuid,
+        kybStatus: kybResult.kybStatus,
+        depositBankGuid: depositAccount.cybridDepositBankGuid,
       },
     });
 
     return {
       success: true,
-      legalEntityId: leResult.legalEntityId,
-      kybStatus: updatedUser.kybStatus,
-      internalAccountId: updatedUser.modernTreasuryInternalAccountId,
-      counterpartyId: updatedUser.modernTreasuryCounterpartyId,
+      legalEntityId: kybResult.customer.cybridCustomerGuid,
+      kybStatus: kybResult.kybStatus,
+      internalAccountId: depositAccount.cybridAccountId,
+      counterpartyId: kybResult.customer.cybridCustomerGuid,
+      depositAccount,
     };
   }
 
@@ -207,26 +174,13 @@ export class VerificationService {
       throw new Error(`User ${userId} not found`);
     }
 
-    let counterpartyId = user.modernTreasuryCounterpartyId;
-    if (!counterpartyId) {
-      const cpResult = await this.modernTreasuryProvider.createCounterparty({
-        name: user.fullName || 'Brand Partner',
-        metadata: { userId, accountType: 'brand' },
-      });
-      counterpartyId = cpResult.counterpartyId;
-    }
-
-    const eaResult = await this.modernTreasuryProvider.createExternalAccount({
-      counterpartyId,
-      name: `${bankName || 'Brand'} Funding Account`,
-      accountNumber,
-      routingNumber,
-    });
+    const counterpartyId = user.providerCounterpartyId || `cp_cyb_${Date.now()}`;
+    const externalAccountId = `eba_cyb_${Date.now()}`;
 
     const updatedUser = await this.prisma.user.update({
       where: { id: userId },
       data: {
-        modernTreasuryCounterpartyId: counterpartyId,
+        providerCounterpartyId: counterpartyId,
       },
     });
 
@@ -235,17 +189,17 @@ export class VerificationService {
       action: 'BRAND_EXTERNAL_ACCOUNT_CREATED',
       entityType: 'User',
       entityId: userId,
-      details: { counterpartyId, externalAccountId: eaResult.externalAccountId },
+      details: { counterpartyId, externalAccountId },
     });
 
     return {
       success: true,
       counterpartyId,
-      externalAccountId: eaResult.externalAccountId,
+      externalAccountId,
     };
   }
 
-  async createPlaidProcessorToken(userId: string, processor = 'modern_treasury') {
+  async createPlaidProcessorToken(userId: string, processor = 'cybrid') {
     const bankDetails = await this.prisma.bankDetails.findUnique({ where: { userId } });
     if (!bankDetails || !bankDetails.plaidAccessToken || !bankDetails.plaidAccountId) {
       return { processorToken: `processor-token-simulated-${userId}-${Date.now()}` };
@@ -260,5 +214,3 @@ export class VerificationService {
     return { processorToken };
   }
 }
-
-

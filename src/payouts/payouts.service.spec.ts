@@ -1,15 +1,24 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PayoutsService } from './payouts.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { ModernTreasuryProvider } from '../infrastructure/providers/modern-treasury/modern-treasury.provider';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { LedgerService } from '../modules/ledger/ledger.service';
+import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
+import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
+import { PayoutStateService } from '../modules/payouts/payout-state.service';
+import { CybridConfigService } from '../infrastructure/providers/cybrid/cybrid-config.service';
+import { BadRequestException } from '@nestjs/common';
 
 describe('PayoutsService', () => {
   let service: PayoutsService;
   let mockPrisma: any;
-  let mockModernTreasuryProvider: any;
   let mockAuditLogsService: any;
+  let mockLedgerService: any;
+  let mockCustomerService: any;
+  let mockAccountService: any;
+  let mockPayoutStateService: any;
+  let mockCybridConfig: any;
+  let mockCybridProvider: any;
 
   beforeEach(async () => {
     mockPrisma = {
@@ -17,11 +26,23 @@ describe('PayoutsService', () => {
         findUnique: jest.fn(),
         update: jest.fn(),
       },
+      talent: {
+        findFirst: jest.fn(),
+      },
       agencyExternalAccount: {
         create: jest.fn(),
         findMany: jest.fn(),
         findFirst: jest.fn(),
         updateMany: jest.fn(),
+      },
+      paymentPayout: {
+        create: jest.fn(),
+        update: jest.fn(),
+        findMany: jest.fn(),
+        findUnique: jest.fn(),
+      },
+      providerOperation: {
+        create: jest.fn(),
       },
       payout: {
         create: jest.fn(),
@@ -31,23 +52,49 @@ describe('PayoutsService', () => {
       },
     };
 
-    mockModernTreasuryProvider = {
-      createCounterparty: jest.fn().mockResolvedValue({ counterpartyId: 'cp_123' }),
-      createExternalAccount: jest.fn().mockResolvedValue({ externalAccountId: 'ea_123' }),
-      getLedgerAccountBalance: jest.fn().mockResolvedValue({ postedBalance: 5000, pendingBalance: 0, currency: 'USD' }),
-      createPayout: jest.fn().mockResolvedValue({ paymentOrderId: 'po_payout_1', status: 'success' }),
-    };
-
     mockAuditLogsService = {
       log: jest.fn().mockResolvedValue({ id: 'log1' }),
+    };
+
+    mockLedgerService = {
+      getAccountBalance: jest.fn().mockResolvedValue({ balance: 50000 }),
+      postJournalEntry: jest.fn().mockResolvedValue({ id: 'je1' }),
+    };
+
+    mockCustomerService = {
+      createOrGetCustomer: jest.fn().mockResolvedValue({ id: 'cust1', cybridCustomerGuid: 'guid1' }),
+    };
+
+    mockAccountService = {
+      ensureUsdFiatAccount: jest.fn().mockResolvedValue({ id: 'acc1', cybridAccountGuid: 'acc_guid1' }),
+      ensureTradingAccount: jest.fn().mockResolvedValue({ id: 'acc2', cybridAccountGuid: 'acc_guid2' }),
+    };
+
+    mockPayoutStateService = {
+      transition: jest.fn().mockResolvedValue({ id: 'payout1' }),
+    };
+
+    mockCybridConfig = {
+      isConfigured: false,
+    };
+
+    mockCybridProvider = {
+      createQuote: jest.fn(),
+      createTransfer: jest.fn(),
+      createTrade: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PayoutsService,
         { provide: PrismaService, useValue: mockPrisma },
-        { provide: ModernTreasuryProvider, useValue: mockModernTreasuryProvider },
         { provide: AuditLogsService, useValue: mockAuditLogsService },
+        { provide: LedgerService, useValue: mockLedgerService },
+        { provide: CybridCustomerService, useValue: mockCustomerService },
+        { provide: CybridAccountService, useValue: mockAccountService },
+        { provide: PayoutStateService, useValue: mockPayoutStateService },
+        { provide: CybridConfigService, useValue: mockCybridConfig },
+        { provide: 'IFinancialProvider', useValue: mockCybridProvider },
       ],
     }).compile();
 
@@ -58,14 +105,14 @@ describe('PayoutsService', () => {
     mockPrisma.user.findUnique.mockResolvedValue({
       id: 'agency-1',
       fullName: 'Test Agency',
-      modernTreasuryCounterpartyId: 'cp_123',
+      providerCounterpartyId: 'cp_123',
     });
 
     mockPrisma.agencyExternalAccount.create.mockResolvedValue({
       id: 'ext-acc-1',
       agencyId: 'agency-1',
       accountName: 'Payout Bank A',
-      modernTreasuryExternalAccountId: 'ea_123',
+      providerExternalAccountId: 'ea_123',
     });
 
     const res = await service.addAgencyExternalAccount({
@@ -78,71 +125,78 @@ describe('PayoutsService', () => {
 
     expect(res).toBeDefined();
     expect(res.id).toBe('ext-acc-1');
-    expect(mockModernTreasuryProvider.createExternalAccount).toHaveBeenCalled();
   });
 
-  it('should request payout when sufficient MT Ledger balance exists', async () => {
+  it('should request agency withdrawal when valid account exists', async () => {
     mockPrisma.user.findUnique.mockResolvedValue({
       id: 'agency-1',
-      modernTreasuryInternalAccountId: 'ia_agency_1',
-      modernTreasuryLedgerAccountId: 'leg_agency_1',
     });
 
     mockPrisma.agencyExternalAccount.findFirst.mockResolvedValue({
       id: 'ext-acc-1',
       agencyId: 'agency-1',
-      modernTreasuryExternalAccountId: 'ea_123',
+      providerExternalAccountId: 'ea_123',
       accountName: 'Payout Bank A',
+      bankName: 'Chase',
+      accountNumberMask: '6789',
     });
 
-    mockPrisma.payout.create.mockResolvedValue({
+    mockPrisma.paymentPayout.create.mockResolvedValue({
       id: 'payout-1',
       agencyId: 'agency-1',
       amount: 2000,
-      status: 'processing',
+      status: 'TRANSFER_PENDING',
     });
 
-    mockPrisma.payout.update.mockResolvedValue({
-      id: 'payout-1',
-      paymentOrderId: 'po_payout_1',
-      status: 'disbursed',
-    });
-
-    const payout = await service.requestPayout({
+    const payout = await service.requestAgencyWithdrawal({
       agencyId: 'agency-1',
       amount: 2000,
       destinationExternalAccountId: 'ext-acc-1',
     });
 
-    expect(payout.status).toBe('disbursed');
-    expect(mockModernTreasuryProvider.createPayout).toHaveBeenCalledWith({
-      payoutId: 'payout-1',
-      agencyId: 'agency-1',
-      amount: 2000,
-      currency: 'USD',
-      originatingInternalAccountId: 'ia_agency_1',
-      receivingExternalAccountId: 'ea_123',
-      paymentType: 'ach',
-    });
+    expect(payout.status).toBe('TRANSFER_PENDING');
   });
 
-  it('should throw BadRequestException on insufficient balance', async () => {
-    mockPrisma.user.findUnique.mockResolvedValue({
-      id: 'agency-1',
-      modernTreasuryInternalAccountId: 'ia_agency_1',
-      modernTreasuryLedgerAccountId: 'leg_agency_1',
+  it('should request domestic talent payout', async () => {
+    mockPrisma.talent.findFirst.mockResolvedValue({
+      id: 'talent-1',
+      fullName: 'Alex Talent',
+      counterparties: [
+        {
+          id: 'cp-1',
+          cybridCounterpartyGuid: 'cpguid-1',
+          externalBankAccounts: [{ id: 'eba-1', cybridExternalBankGuid: 'ebaguid-1' }],
+        },
+      ],
     });
 
-    mockModernTreasuryProvider.getLedgerAccountBalance.mockResolvedValue({
-      postedBalance: 500,
-      pendingBalance: 0,
-      currency: 'USD',
+    mockPrisma.paymentPayout.create.mockResolvedValue({
+      id: 'po-1',
+      amount: 1000,
+      status: 'VALIDATING',
     });
 
+    mockPrisma.paymentPayout.update.mockResolvedValue({
+      id: 'po-1',
+      amount: 1000,
+      status: 'TRANSFER_PENDING',
+    });
+
+    const result = await service.requestDomesticTalentPayout({
+      agencyId: 'agency-1',
+      talentId: 'talent-1',
+      amount: 1000,
+    });
+
+    expect(result.id).toBe('po-1');
+    expect(mockLedgerService.postJournalEntry).toHaveBeenCalled();
+  });
+
+  it('should throw BadRequestException on non-positive payout amount', async () => {
     await expect(
-      service.requestPayout({
+      service.requestAgencyWithdrawal({
         agencyId: 'agency-1',
-        amount: 2000,
+        amount: -500,
         destinationExternalAccountId: 'ext-acc-1',
       }),
     ).rejects.toThrow(BadRequestException);

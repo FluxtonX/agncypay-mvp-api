@@ -176,7 +176,7 @@ async function main() {
   const flags = [
     { key: "wire_enabled", enabled: false, description: "Wire transfer payment option (disabled for MVP)" },
     { key: "rtp_enabled", enabled: false, description: "Real-Time Payment option (disabled for MVP)" },
-    { key: "ach_enabled", enabled: true, description: "Modern Treasury ACH payment processing" },
+    { key: "ach_enabled", enabled: true, description: "ACH payment processing" },
     { key: "plaid_enabled", enabled: true, description: "Plaid bank account verification" },
     { key: "qbo_sync_enabled", enabled: true, description: "QuickBooks Online read-only invoice sync" },
   ];

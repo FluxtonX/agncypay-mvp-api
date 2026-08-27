@@ -45,8 +45,8 @@ describe('PlaidProvider', () => {
     expect(Array.isArray(res.accounts)).toBe(true);
   });
 
-  it('should create processor token for Modern Treasury', async () => {
-    const token = await provider.createProcessorToken('access-sandbox-simulated-user-123', 'acc-123', 'modern_treasury');
+  it('should create processor token for payment processor', async () => {
+    const token = await provider.createProcessorToken('access-sandbox-simulated-user-123', 'acc-123', 'cybrid');
     expect(token).toBeDefined();
     expect(token).toContain('processor-token-');
   });

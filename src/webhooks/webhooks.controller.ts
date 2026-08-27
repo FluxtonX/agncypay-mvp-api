@@ -1,25 +1,28 @@
-import { Controller, Post, Req, Headers, Body, HttpCode, HttpStatus } from '@nestjs/common';
-import type { RawBodyRequest } from '@nestjs/common';
-import type { Request } from 'express';
+import { Controller, Get, Post, Body, Headers, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import { InvoicesService } from '../invoices/invoices.service';
+import { CybridWebhookService } from './cybrid-webhook.service';
 
 @ApiTags('Webhooks')
 @Controller('webhooks')
 export class WebhooksController {
-  constructor(private readonly invoicesService: InvoicesService) {}
+  constructor(private readonly cybridWebhookService: CybridWebhookService) {}
 
-  @ApiOperation({ summary: 'Handle real-time payment status webhooks from Modern Treasury' })
-  @ApiResponse({ status: 200, description: 'Webhook event received and processed successfully' })
-  @ApiResponse({ status: 401, description: 'Invalid HMAC signature header' })
+  @ApiOperation({ summary: 'Webhook endpoint health check' })
+  @ApiResponse({ status: 200, description: 'Webhook service online' })
   @HttpCode(HttpStatus.OK)
-  @Post('modern-treasury')
-  async handleModernTreasuryWebhook(
-    @Req() req: RawBodyRequest<Request>,
-    @Headers('x-signature') signature: string,
-    @Body() body: any,
+  @Get('health')
+  async healthCheck() {
+    return { status: 'online', service: 'AgncyPay Webhook Listener' };
+  }
+
+  @ApiOperation({ summary: 'Cybrid Webhook ingestion endpoint' })
+  @ApiResponse({ status: 200, description: 'Webhook processed' })
+  @HttpCode(HttpStatus.OK)
+  @Post('cybrid')
+  async handleCybridWebhook(
+    @Body() payload: any,
+    @Headers('x-cybrid-signature') signature?: string,
   ) {
-    const rawBody = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(body);
-    return this.invoicesService.handleModernTreasuryWebhook(body, rawBody, signature);
+    return this.cybridWebhookService.processWebhookEvent(payload, signature);
   }
 }

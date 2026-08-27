@@ -1,8 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { WalletRepository } from '../../infrastructure/database/repositories/wallet.repository';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
-import { ModernTreasuryProvider } from '../../infrastructure/providers/modern-treasury/modern-treasury.provider';
 import { PrismaService } from '../../prisma/prisma.service';
+import { LedgerService } from '../ledger/ledger.service';
 import { AccountType, LedgerType, Wallet } from '@prisma/client';
 
 @Injectable()
@@ -10,8 +10,8 @@ export class WalletsService {
   constructor(
     private readonly walletRepo: WalletRepository,
     private readonly auditLogsService: AuditLogsService,
-    private readonly modernTreasuryProvider: ModernTreasuryProvider,
     private readonly prisma: PrismaService,
+    @Optional() private readonly ledgerService?: LedgerService,
   ) {}
 
   private generateWalletId(accountType: AccountType): string {
@@ -58,13 +58,16 @@ export class WalletsService {
   }
 
   async syncWalletWithLedger(wallet: Wallet): Promise<Wallet> {
-    const user = await this.prisma.user.findUnique({ where: { id: wallet.userId } });
-    if (user?.modernTreasuryLedgerAccountId) {
-      const ledgerBalance = await this.modernTreasuryProvider.getLedgerAccountBalance(user.modernTreasuryLedgerAccountId);
-      if (wallet.balance !== ledgerBalance.postedBalance) {
-        return this.walletRepo.update(wallet.id, { balance: ledgerBalance.postedBalance });
+    if (!this.ledgerService) return wallet;
+
+    try {
+      const code = `AGENCY:${wallet.userId}:USD`;
+      const accountBal = await this.ledgerService.getAccountBalance(code);
+      if (accountBal.balance > 0 && accountBal.balance !== wallet.balance) {
+        return this.walletRepo.update(wallet.id, { balance: accountBal.balance });
       }
-    }
+    } catch (_) {}
+
     return wallet;
   }
 

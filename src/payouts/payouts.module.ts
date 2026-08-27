@@ -1,13 +1,22 @@
 import { Module } from '@nestjs/common';
-import { PayoutsController } from './payouts.controller';
 import { PayoutsService } from './payouts.service';
+import { PayoutsController } from './payouts.controller';
 import { PrismaModule } from '../prisma/prisma.module';
-import { ModernTreasuryProvider } from '../infrastructure/providers/modern-treasury/modern-treasury.provider';
+import { AuditLogsModule } from '../modules/audit-logs/audit-logs.module';
+import { LedgerModule } from '../modules/ledger/ledger.module';
+import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
+import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
+import { PayoutStateService } from '../modules/payouts/payout-state.service';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AuditLogsModule, LedgerModule],
   controllers: [PayoutsController],
-  providers: [PayoutsService, ModernTreasuryProvider],
-  exports: [PayoutsService],
+  providers: [
+    PayoutsService,
+    PayoutStateService,
+    CybridCustomerService,
+    CybridAccountService,
+  ],
+  exports: [PayoutsService, PayoutStateService],
 })
 export class PayoutsModule {}

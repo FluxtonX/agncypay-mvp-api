@@ -1,0 +1,185 @@
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
+import { LedgerService } from '../ledger/ledger.service';
+import { CybridAccountService } from '../cybrid/cybrid-account.service';
+import { PaymentStateService } from './payment-state.service';
+
+@Injectable()
+export class PaymentService {
+  private readonly logger = new Logger(PaymentService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditLogsService: AuditLogsService,
+    private readonly ledgerService: LedgerService,
+    private readonly cybridAccountService: CybridAccountService,
+    private readonly paymentStateService: PaymentStateService,
+  ) {}
+
+  async createPayment(data: {
+    brandId: string;
+    agencyId: string;
+    amount: number;
+    currency?: string;
+    invoiceId?: string;
+    paymentMethod?: string;
+    metadata?: Record<string, any>;
+  }) {
+    if (data.amount <= 0) {
+      throw new BadRequestException('Payment amount must be greater than 0');
+    }
+
+    const brand = await this.prisma.user.findUnique({ where: { id: data.brandId } });
+    if (!brand) throw new NotFoundException(`Brand user ${data.brandId} not found`);
+
+    const agency = await this.prisma.user.findUnique({ where: { id: data.agencyId } });
+    if (!agency) throw new NotFoundException(`Agency user ${data.agencyId} not found`);
+
+    // Ensure Agency has a Cybrid Deposit Bank Account for receiving external funds
+    const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(data.agencyId);
+
+    const paymentNumber = `PAY-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    const payment = await this.prisma.payment.create({
+      data: {
+        paymentNumber,
+        brandId: data.brandId,
+        agencyId: data.agencyId,
+        invoiceId: data.invoiceId,
+        amount: data.amount,
+        currency: data.currency || 'USD',
+        status: 'PENDING_FUNDING',
+        paymentMethod: data.paymentMethod || 'ach',
+        cybridDepositRef: depositAccount.uniqueMemoId || depositAccount.accountNumber,
+        metadata: data.metadata || {},
+      },
+    });
+
+    await this.auditLogsService.log({
+      userId: data.brandId,
+      action: 'PAYMENT_CREATED_PENDING_FUNDING',
+      entityType: 'Payment',
+      entityId: payment.id,
+      details: {
+        paymentNumber,
+        amount: data.amount,
+        agencyId: data.agencyId,
+        depositRef: payment.cybridDepositRef,
+      },
+    });
+
+    // Return payment with funding instructions for the Brand
+    const fundingInstructions = await this.cybridAccountService.getAgencyFundingInstructions(data.agencyId);
+
+    return {
+      payment,
+      fundingInstructions,
+    };
+  }
+
+  async markPaymentFunded(
+    paymentId: string,
+    details?: {
+      transferGuid?: string;
+      rawPayload?: any;
+    },
+  ) {
+    const payment = await this.prisma.payment.findUnique({ where: { id: paymentId } });
+    if (!payment) throw new NotFoundException(`Payment ${paymentId} not found`);
+
+    // Transition to FUNDED
+    await this.paymentStateService.transition(paymentId, 'FUNDED', {
+      providerRef: details?.transferGuid,
+    });
+
+    // Record provider operation
+    if (details?.transferGuid) {
+      await this.prisma.providerOperation.upsert({
+        where: {
+          provider_operationType_operationGuid: {
+            provider: 'cybrid',
+            operationType: 'transfer',
+            operationGuid: details.transferGuid,
+          },
+        },
+        update: {
+          status: 'completed',
+          rawResponse: details.rawPayload || {},
+        },
+        create: {
+          provider: 'cybrid',
+          operationType: 'transfer',
+          operationGuid: details.transferGuid,
+          paymentId: payment.id,
+          status: 'completed',
+          rawResponse: details.rawPayload || {},
+        },
+      });
+
+      await this.prisma.payment.update({
+        where: { id: paymentId },
+        data: { cybridTransferGuid: details.transferGuid },
+      });
+    }
+
+    // ─── Double-Entry Ledger Posting ───
+    // Debit: Platform clearing account (holding inbound funds)
+    // Credit: Agency USD account (balance available to agency)
+    await this.ledgerService.postJournalEntry({
+      debitAccountCode: `CLEARING:CYBRID_DEPOSIT:USD`,
+      creditAccountCode: `AGENCY:${payment.agencyId}:USD`,
+      amount: payment.amount,
+      currency: payment.currency,
+      referenceType: 'BRAND_PAYMENT_FUNDED',
+      referenceId: payment.id,
+      providerReference: details?.transferGuid || payment.cybridDepositRef || undefined,
+      description: `Inbound funding for Payment ${payment.paymentNumber} from Brand`,
+    });
+
+    // Transition to COMPLETED
+    const completedPayment = await this.paymentStateService.transition(paymentId, 'COMPLETED');
+
+    return completedPayment;
+  }
+
+  async getPaymentById(paymentId: string, requestingUserId: string) {
+    const payment = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+      include: {
+        brand: { select: { id: true, fullName: true, email: true } },
+        agency: { select: { id: true, fullName: true, email: true } },
+        payouts: true,
+        providerOperations: true,
+      },
+    });
+
+    if (!payment) throw new NotFoundException(`Payment ${paymentId} not found`);
+
+    // Strict agency / brand isolation check
+    if (payment.brandId !== requestingUserId && payment.agencyId !== requestingUserId) {
+      throw new ForbiddenException('Access denied to this payment record');
+    }
+
+    return payment;
+  }
+
+  async getPayments(userId: string) {
+    return this.prisma.payment.findMany({
+      where: {
+        OR: [{ brandId: userId }, { agencyId: userId }],
+      },
+      include: {
+        brand: { select: { id: true, fullName: true, email: true } },
+        agency: { select: { id: true, fullName: true, email: true } },
+        payouts: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async getFundingInstructions(paymentId: string, requestingUserId: string) {
+    const payment = await this.getPaymentById(paymentId, requestingUserId);
+    return this.cybridAccountService.getAgencyFundingInstructions(payment.agencyId);
+  }
+}
