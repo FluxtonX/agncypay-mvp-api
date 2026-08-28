@@ -336,6 +336,7 @@ export class CybridProvider implements IFinancialProvider {
       product_type: params.productType,
       customer_guid: params.customerGuid,
       asset: params.asset,
+      symbol: params.symbol || (params.productType === 'trading' ? 'USDC-USD' : undefined),
       side: params.side,
       receive_amount: params.receiveAmount,
       deliver_amount: params.deliverAmount,

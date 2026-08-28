@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, BadRequestException, Logger, Inject } fr
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
 import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
+import { ExternalBankAccountService } from '../modules/cybrid/external-bank-account.service';
 import { CybridConfigService } from '../infrastructure/providers/cybrid/cybrid-config.service';
 import type { IFinancialProvider } from '../core/interfaces/financial-provider.interface';
 
@@ -13,6 +14,7 @@ export class TalentService {
     private readonly prisma: PrismaService,
     private readonly auditLogsService: AuditLogsService,
     private readonly customerService: CybridCustomerService,
+    private readonly externalBankAccountService: ExternalBankAccountService,
     private readonly config: CybridConfigService,
     @Inject('IFinancialProvider') private readonly cybridProvider: IFinancialProvider,
   ) {}
@@ -59,6 +61,11 @@ export class TalentService {
         const firstName = nameParts[0];
         const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'Talent';
 
+        const country = data.country || 'US';
+        const postalCode = country === 'BR' ? '01310-100' : (country === 'CA' ? 'M5V 2T6' : '94105');
+        const city = country === 'BR' ? 'Sao Paulo' : (country === 'CA' ? 'Toronto' : 'San Francisco');
+        const subdivision = country === 'BR' ? 'SP' : (country === 'CA' ? 'ON' : 'CA');
+
         const cpResp = await this.cybridProvider.createCounterparty({
           customerGuid: customer.cybridCustomerGuid,
           type: 'individual',
@@ -69,10 +76,10 @@ export class TalentService {
           },
           address: {
             street: '123 Talent Way',
-            city: 'San Francisco',
-            subdivision: 'CA',
-            postalCode: '94105',
-            countryCode: data.country || 'US',
+            city,
+            subdivision,
+            postalCode,
+            countryCode: country,
           },
           email: data.email,
           phone: data.phone,
@@ -114,6 +121,28 @@ export class TalentService {
       talent,
       counterparty,
     };
+  }
+
+  async linkBankAccount(
+    talentId: string,
+    agencyId: string,
+    bankData: {
+      bankName: string;
+      accountNumber: string;
+      routingNumber: string;
+      accountHolderName?: string;
+    },
+  ) {
+    const talent = await this.getTalentById(talentId, agencyId);
+
+    return this.externalBankAccountService.linkTalentBankAccount({
+      agencyId,
+      talentId: talent.id,
+      bankName: bankData.bankName,
+      accountNumber: bankData.accountNumber,
+      routingNumber: bankData.routingNumber,
+      accountHolderName: bankData.accountHolderName,
+    });
   }
 
   async getTalents(agencyId: string) {
@@ -193,3 +222,4 @@ export class TalentService {
     return { success: true };
   }
 }
+

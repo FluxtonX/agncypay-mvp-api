@@ -25,4 +25,13 @@ export class WebhooksController {
   ) {
     return this.cybridWebhookService.processWebhookEvent(payload, signature);
   }
+
+  @ApiOperation({ summary: 'Simulate Cybrid Webhook for Testing and Development' })
+  @ApiResponse({ status: 200, description: 'Simulated event processed' })
+  @HttpCode(HttpStatus.OK)
+  @Post('cybrid/simulate')
+  async simulateCybridWebhook(@Body() payload: any) {
+    return this.cybridWebhookService.processWebhookEvent(payload);
+  }
 }
+

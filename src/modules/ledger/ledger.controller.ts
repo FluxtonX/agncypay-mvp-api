@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Param, UseGuards, ForbiddenException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { LedgerService } from './ledger.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -13,23 +13,45 @@ export class LedgerController {
 
   @ApiOperation({ summary: 'Get balance of a ledger account' })
   @Get('balance/:accountCode')
-  async getBalance(@Param('accountCode') accountCode: string) {
+  async getBalance(
+    @Param('accountCode') accountCode: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    // Tenant safety check: User can only query their own account or system clearing if authorized
+    if (accountCode.startsWith('AGENCY:') && !accountCode.includes(userId)) {
+      throw new ForbiddenException('Access denied to this ledger account');
+    }
     return this.ledgerService.getAccountBalance(accountCode);
   }
 
   @ApiOperation({ summary: 'Get Agency internal ledger balance' })
   @Get('agency-balance')
   async getAgencyBalance(@CurrentUser('id') agencyId: string) {
-    const code = `AGENCY:${agencyId}:USD`;
-    return this.ledgerService.getAccountBalance(code);
+    const usdCode = `AGENCY:${agencyId}:USD`;
+    const usdcCode = `AGENCY:${agencyId}:USDC_TRADING`;
+
+    const usdBalance = await this.ledgerService.getAccountBalance(usdCode);
+    const usdcBalance = await this.ledgerService.getAccountBalance(usdcCode);
+
+    return {
+      usd: usdBalance,
+      usdc: usdcBalance,
+      totalAvailableUsd: usdBalance.balance,
+    };
   }
 
-  @ApiOperation({ summary: 'Get Journal entries history' })
+  @ApiOperation({ summary: 'Get Journal entries history for the authenticated user' })
   @Get('journal')
   async getJournalHistory(
+    @CurrentUser('id') userId: string,
     @Query('accountCode') accountCode?: string,
     @Query('limit') limit?: number,
   ) {
-    return this.ledgerService.getJournalHistory(accountCode, limit ? Number(limit) : 50);
+    const targetCode = accountCode || `AGENCY:${userId}:USD`;
+    if (targetCode.startsWith('AGENCY:') && !targetCode.includes(userId)) {
+      throw new ForbiddenException('Access denied to this ledger account history');
+    }
+    return this.ledgerService.getJournalHistory(targetCode, limit ? Number(limit) : 50);
   }
 }
+

@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { CybridConfigService } from '../../infrastructure/providers/cybrid/cybrid-config.service';
 import type { IFinancialProvider } from '../../core/interfaces/financial-provider.interface';
+import { KybStatus } from '@prisma/client';
 
 @Injectable()
 export class CybridCustomerService {
@@ -171,11 +172,11 @@ export class CybridCustomerService {
     }
 
     // Strictly sync status with Cybrid live state
-    let newKybStatus = 'pending';
+    let newKybStatus: KybStatus = KybStatus.pending;
     if (verificationState === 'completed' && outcome === 'passed') {
-      newKybStatus = 'approved';
+      newKybStatus = KybStatus.approved;
     } else if (outcome === 'failed' || verificationState === 'rejected') {
-      newKybStatus = 'rejected';
+      newKybStatus = KybStatus.rejected;
     }
 
     const updatedCustomer = await this.prisma.cybridCustomer.update({

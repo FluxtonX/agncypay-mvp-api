@@ -182,6 +182,7 @@ export interface CreateQuoteParams {
   customerGuid: string;
   productType: 'trading' | 'funding' | 'book_transfer' | 'crypto_transfer';
   asset?: string;
+  symbol?: string;
   side?: 'deposit' | 'withdrawal' | 'buy' | 'sell';
   receiveAmount?: number; // integer (minor units / cents)
   deliverAmount?: number; // integer (minor units / cents)

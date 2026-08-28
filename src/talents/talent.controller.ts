@@ -33,6 +33,21 @@ export class TalentController {
     });
   }
 
+  @ApiOperation({ summary: 'Link an external bank account to a Talent for payouts' })
+  @Post(':id/bank-account')
+  async linkBankAccount(
+    @Param('id') talentId: string,
+    @CurrentUser('id') agencyId: string,
+    @Body() bankData: {
+      bankName: string;
+      accountNumber: string;
+      routingNumber: string;
+      accountHolderName?: string;
+    },
+  ) {
+    return this.talentService.linkBankAccount(talentId, agencyId, bankData);
+  }
+
   @ApiOperation({ summary: 'Get all Talents for the current Agency' })
   @Get()
   async getTalents(@CurrentUser('id') agencyId: string) {
@@ -67,3 +82,4 @@ export class TalentController {
     return this.talentService.deleteTalent(id, agencyId);
   }
 }
+
