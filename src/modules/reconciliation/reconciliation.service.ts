@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
+import { Injectable, Logger, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -6,8 +6,9 @@ import { CybridConfigService } from '../../infrastructure/providers/cybrid/cybri
 import type { IFinancialProvider } from '../../core/interfaces/financial-provider.interface';
 
 @Injectable()
-export class ReconciliationService {
+export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ReconciliationService.name);
+  private reconciliationTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -17,9 +18,29 @@ export class ReconciliationService {
     @Inject('IFinancialProvider') private readonly cybridProvider: IFinancialProvider,
   ) {}
 
+  onModuleInit() {
+    // 5-minute automated reconciliation loop (300,000 ms)
+    const intervalMs = 5 * 60 * 1000;
+    this.reconciliationTimer = setInterval(() => {
+      this.runReconciliation().catch((err) => {
+        this.logger.error(`Automated periodic reconciliation error: ${err.message}`);
+      });
+    }, intervalMs);
+    this.logger.log(`Scheduled automated Cybrid reconciliation to run every 5 minutes.`);
+  }
+
+  onModuleDestroy() {
+    if (this.reconciliationTimer) {
+      clearInterval(this.reconciliationTimer);
+      this.reconciliationTimer = null;
+    }
+  }
+
   async runReconciliation(): Promise<{
     checkedPayments: number;
     checkedPayouts: number;
+    checkedTrades: number;
+    checkedExecutions: number;
     discrepanciesFound: number;
     recordsCreated: number;
   }> {
@@ -27,6 +48,8 @@ export class ReconciliationService {
 
     let discrepanciesFound = 0;
     let recordsCreated = 0;
+    let checkedTrades = 0;
+    let checkedExecutions = 0;
 
     // 1. Reconcile Inbound Payments
     const pendingPayments = await this.prisma.payment.findMany({
@@ -46,8 +69,8 @@ export class ReconciliationService {
               entityId: payment.id,
               cybridState: cybridTransfer.state,
               internalState: payment.status,
-              cybridAmount: cybridTransfer.amount !== undefined ? cybridTransfer.amount / 100 : payment.amount,
-              internalAmount: payment.amount,
+              cybridAmount: cybridTransfer.amount !== undefined ? cybridTransfer.amount / 100 : Number(payment.amount),
+              internalAmount: Number(payment.amount),
               discrepancyType: 'status_mismatch',
               notes: `Cybrid reports transfer ${payment.cybridTransferGuid} is completed, but payment was PENDING_FUNDING`,
             });
@@ -59,15 +82,15 @@ export class ReconciliationService {
       }
     }
 
-    // 2. Reconcile Outbound Payouts
-    const pendingPayouts = await this.prisma.paymentPayout.findMany({
+    // 2. Reconcile Outbound Domestic Payouts (Transfers)
+    const pendingPayoutTransfers = await this.prisma.paymentPayout.findMany({
       where: {
-        status: { in: ['TRANSFER_PENDING', 'TRADE_PENDING'] },
+        status: { in: ['TRANSFER_PENDING', 'VALIDATING', 'QUOTE_PENDING'] },
         cybridTransferGuid: { not: null },
       },
     });
 
-    for (const payout of pendingPayouts) {
+    for (const payout of pendingPayoutTransfers) {
       if (this.config.isConfigured && payout.cybridTransferGuid) {
         try {
           const cybridTransfer = await this.cybridProvider.getTransfer(payout.cybridTransferGuid);
@@ -80,8 +103,8 @@ export class ReconciliationService {
               entityId: payout.id,
               cybridState: cybridTransfer.state,
               internalState: payout.status,
-              cybridAmount: cybridTransfer.amount !== undefined ? cybridTransfer.amount / 100 : payout.amount,
-              internalAmount: payout.amount,
+              cybridAmount: cybridTransfer.amount !== undefined ? cybridTransfer.amount / 100 : Number(payout.amount),
+              internalAmount: Number(payout.amount),
               discrepancyType: 'status_mismatch',
               notes: `Cybrid reports transfer ${payout.cybridTransferGuid} is completed, but payout was ${payout.status}`,
             });
@@ -93,38 +116,109 @@ export class ReconciliationService {
       }
     }
 
-    // 3. Balance Reconciliation for Agencies
+    // 3. Reconcile International FX Trades
+    const pendingPayoutTrades = await this.prisma.paymentPayout.findMany({
+      where: {
+        status: 'TRADE_PENDING',
+        cybridTradeGuid: { not: null },
+      },
+    });
+    checkedTrades = pendingPayoutTrades.length;
+
+    for (const payout of pendingPayoutTrades) {
+      if (this.config.isConfigured && payout.cybridTradeGuid) {
+        try {
+          const cybridTrade = await this.cybridProvider.getTrade(payout.cybridTradeGuid);
+
+          if (cybridTrade.state === 'completed') {
+            discrepanciesFound++;
+            await this.createDiscrepancy({
+              reconciliationType: 'trade',
+              entityType: 'payout',
+              entityId: payout.id,
+              cybridState: cybridTrade.state,
+              internalState: payout.status,
+              cybridAmount: cybridTrade.deliverAmount !== undefined ? cybridTrade.deliverAmount / 100 : Number(payout.amount),
+              internalAmount: Number(payout.amount),
+              discrepancyType: 'status_mismatch',
+              notes: `Cybrid reports FX trade ${payout.cybridTradeGuid} is completed, but payout status was TRADE_PENDING`,
+            });
+            recordsCreated++;
+          }
+        } catch (err) {
+          this.logger.warn(`Could not check payout trade ${payout.cybridTradeGuid}: ${err.message}`);
+        }
+      }
+    }
+
+    // 4. Reconcile International Remittance Executions
+    const pendingPayoutExecutions = await this.prisma.paymentPayout.findMany({
+      where: {
+        status: { in: ['REMITTANCE_PENDING', 'EXECUTION_PENDING', 'REMITTANCE_PROCESSING'] },
+        cybridExecutionGuid: { not: null },
+      },
+    });
+    checkedExecutions = pendingPayoutExecutions.length;
+
+    for (const payout of pendingPayoutExecutions) {
+      if (this.config.isConfigured && payout.cybridExecutionGuid) {
+        try {
+          const cybridExec = await this.cybridProvider.getExecution(payout.cybridExecutionGuid);
+
+          if (cybridExec.state === 'completed' && payout.status !== 'COMPLETED') {
+            discrepanciesFound++;
+            await this.createDiscrepancy({
+              reconciliationType: 'execution',
+              entityType: 'payout',
+              entityId: payout.id,
+              cybridState: cybridExec.state,
+              internalState: payout.status,
+              cybridAmount: Number(payout.amount),
+              internalAmount: Number(payout.amount),
+              discrepancyType: 'status_mismatch',
+              notes: `Cybrid reports execution ${payout.cybridExecutionGuid} is completed, but payout was ${payout.status}`,
+            });
+            recordsCreated++;
+          }
+        } catch (err) {
+          this.logger.warn(`Could not check payout execution ${payout.cybridExecutionGuid}: ${err.message}`);
+        }
+      }
+    }
+
+    // 5. Balance Reconciliation for Agencies (USD & USDC)
     const agencies = await this.prisma.user.findMany({
       where: { accountType: 'agency' },
       include: { cybridCustomer: { include: { accounts: true } } },
     });
 
     for (const agency of agencies) {
-      const ledgerBal = await this.ledgerService.getAccountBalance(`AGENCY:${agency.id}:USD`);
-      const usdAccount = agency.cybridCustomer?.accounts.find((a) => a.asset === 'USD');
+      if (!agency.cybridCustomer) continue;
 
+      const usdAccount = agency.cybridCustomer.accounts.find((a) => a.asset === 'USD');
       if (usdAccount && this.config.isConfigured) {
         try {
           const cybridAcc = await this.cybridProvider.getAccount(usdAccount.cybridAccountGuid);
-          const platformBal = cybridAcc.platformAvailable ? parseFloat(cybridAcc.platformAvailable) : 0;
+          const platformBal = cybridAcc.platformBalance ? parseFloat(cybridAcc.platformBalance) / 100 : (cybridAcc.platformAvailable ? parseFloat(cybridAcc.platformAvailable) : 0);
+          const ledgerBal = await this.ledgerService.getAccountBalance(`AGENCY:${agency.id}:USD`);
 
           if (Math.abs(platformBal - ledgerBal.balance) > 0.01) {
             discrepanciesFound++;
             await this.createDiscrepancy({
               reconciliationType: 'balance',
-              entityType: 'agency_balance',
+              entityType: 'agency_balance_usd',
               entityId: agency.id,
-              cybridState: `platformAvailable: $${platformBal}`,
-              internalState: `ledgerBalance: $${ledgerBal.balance}`,
+              cybridState: `platform_balance:${platformBal}`,
+              internalState: `ledger_balance:${ledgerBal.balance}`,
               cybridAmount: platformBal,
               internalAmount: ledgerBal.balance,
               discrepancyType: 'amount_mismatch',
-              notes: `Agency ${agency.id} balance mismatch: Cybrid ($${platformBal}) vs Ledger ($${ledgerBal.balance})`,
+              notes: `Agency ${agency.id} USD balance mismatch: Cybrid ($${platformBal}) vs Ledger ($${ledgerBal.balance})`,
             });
             recordsCreated++;
           }
         } catch (err) {
-          this.logger.warn(`Could not check Cybrid balance for agency ${agency.id}`);
+          this.logger.warn(`Could not reconcile agency balance for ${agency.id}: ${err.message}`);
         }
       }
     }
@@ -135,7 +229,9 @@ export class ReconciliationService {
 
     return {
       checkedPayments: pendingPayments.length,
-      checkedPayouts: pendingPayouts.length,
+      checkedPayouts: pendingPayoutTransfers.length,
+      checkedTrades,
+      checkedExecutions,
       discrepanciesFound,
       recordsCreated,
     };
@@ -147,8 +243,8 @@ export class ReconciliationService {
     entityId?: string;
     cybridState?: string;
     internalState?: string;
-    cybridAmount?: number;
-    internalAmount?: number;
+    cybridAmount?: number | any;
+    internalAmount?: number | any;
     discrepancyType?: string;
     notes?: string;
   }) {
@@ -159,8 +255,8 @@ export class ReconciliationService {
         entityId: data.entityId,
         cybridState: data.cybridState,
         internalState: data.internalState,
-        cybridAmount: data.cybridAmount,
-        internalAmount: data.internalAmount,
+        cybridAmount: data.cybridAmount as any,
+        internalAmount: data.internalAmount as any,
         discrepancyType: data.discrepancyType,
         resolution: 'unresolved',
         notes: data.notes,

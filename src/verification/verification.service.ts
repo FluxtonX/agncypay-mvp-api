@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
 import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
 import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
+import { encryptText, decryptText } from '../common/utils/crypto.util';
 
 @Injectable()
 export class VerificationService {
@@ -19,6 +20,7 @@ export class VerificationService {
 
   async getVerificationState(userId: string) {
     const [
+      user,
       businessProfile,
       representative,
       authorization,
@@ -27,6 +29,7 @@ export class VerificationService {
       documents,
       cybridCustomer,
     ] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, kybStatus: true } }),
       this.prisma.businessProfile.findUnique({ where: { userId } }),
       this.prisma.representative.findUnique({ where: { userId } }),
       this.prisma.authorization.findUnique({ where: { userId } }),
@@ -39,6 +42,8 @@ export class VerificationService {
       }),
     ]);
 
+    const effectiveKybStatus = user?.kybStatus || cybridCustomer?.kybStatus || (businessProfile?.legalName ? 'pending' : 'not_started');
+
     return {
       businessProfile,
       representative,
@@ -47,7 +52,7 @@ export class VerificationService {
       bankDetails,
       documents,
       cybridCustomer,
-      kybStatus: cybridCustomer?.kybStatus || (businessProfile?.legalName ? 'pending' : 'not_started'),
+      kybStatus: effectiveKybStatus,
       legalEntityId: cybridCustomer?.cybridCustomerGuid || null,
       depositAccount: cybridCustomer?.accounts?.flatMap((a) => a.depositBankAccounts)?.[0] || null,
     };
@@ -61,6 +66,10 @@ export class VerificationService {
     const result = await this.plaidProvider.exchangePublicToken({ userId, publicToken });
     const primaryAccount = result.accounts[0];
 
+    const encryptedAccessToken = encryptText(result.accessToken);
+    const encryptedAccountId = primaryAccount?.accountId ? encryptText(primaryAccount.accountId) : null;
+    const encryptedItemId = result.itemId ? encryptText(result.itemId) : null;
+
     const bankDetails = await this.prisma.bankDetails.upsert({
       where: { userId },
       update: {
@@ -68,9 +77,9 @@ export class VerificationService {
         accountNumber: `****${primaryAccount?.accountNumberMask || '6789'}`,
         routingNumber: primaryAccount?.routingNumber || '111000025',
         accountHolderName: primaryAccount?.accountHolderName || 'Verified Account Holder',
-        plaidAccessToken: result.accessToken,
-        plaidAccountId: primaryAccount?.accountId,
-        plaidItemId: result.itemId,
+        plaidAccessToken: encryptedAccessToken,
+        plaidAccountId: encryptedAccountId,
+        plaidItemId: encryptedItemId,
         status: 'approved',
       },
       create: {
@@ -79,9 +88,9 @@ export class VerificationService {
         accountNumber: `****${primaryAccount?.accountNumberMask || '6789'}`,
         routingNumber: primaryAccount?.routingNumber || '111000025',
         accountHolderName: primaryAccount?.accountHolderName || 'Verified Account Holder',
-        plaidAccessToken: result.accessToken,
-        plaidAccountId: primaryAccount?.accountId,
-        plaidItemId: result.itemId,
+        plaidAccessToken: encryptedAccessToken,
+        plaidAccountId: encryptedAccountId,
+        plaidItemId: encryptedItemId,
         status: 'approved',
       },
     });
@@ -222,43 +231,55 @@ export class VerificationService {
   async setupBrandFundingAccount(userId: string, accountNumber: string, routingNumber: string, bankName?: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
-      throw new Error(`User ${userId} not found`);
+      throw new NotFoundException(`User ${userId} not found`);
     }
 
-    const counterpartyId = user.providerCounterpartyId || `cp_cyb_${Date.now()}`;
-    const externalAccountId = `eba_cyb_${Date.now()}`;
-
-    const updatedUser = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        providerCounterpartyId: counterpartyId,
+    const mask = accountNumber.length >= 4 ? accountNumber.slice(-4) : 'XXXX';
+    const bankDetails = await this.prisma.bankDetails.upsert({
+      where: { userId },
+      update: {
+        bankName: bankName || 'Brand Linked Bank',
+        accountNumber: `****${mask}`,
+        routingNumber,
+        accountHolderName: user.fullName || 'Brand Partner',
+        status: 'approved',
+      },
+      create: {
+        userId,
+        bankName: bankName || 'Brand Linked Bank',
+        accountNumber: `****${mask}`,
+        routingNumber,
+        accountHolderName: user.fullName || 'Brand Partner',
+        status: 'approved',
       },
     });
 
     await this.auditLogsService.log({
       userId,
-      action: 'BRAND_EXTERNAL_ACCOUNT_CREATED',
-      entityType: 'User',
-      entityId: userId,
-      details: { counterpartyId, externalAccountId },
+      action: 'BRAND_FUNDING_ACCOUNT_CONFIGURED',
+      entityType: 'BankDetails',
+      entityId: bankDetails.id,
+      details: { bankName: bankDetails.bankName, mask, routingNumber },
     });
 
     return {
       success: true,
-      counterpartyId,
-      externalAccountId,
+      bankDetails,
     };
   }
 
   async createPlaidProcessorToken(userId: string, processor = 'cybrid') {
     const bankDetails = await this.prisma.bankDetails.findUnique({ where: { userId } });
     if (!bankDetails || !bankDetails.plaidAccessToken || !bankDetails.plaidAccountId) {
-      return { processorToken: `processor-token-simulated-${userId}-${Date.now()}` };
+      throw new NotFoundException(`Plaid verified bank details not found for user ${userId}`);
     }
 
+    const decryptedAccessToken = decryptText(bankDetails.plaidAccessToken);
+    const decryptedAccountId = decryptText(bankDetails.plaidAccountId);
+
     const processorToken = await this.plaidProvider.createProcessorToken(
-      bankDetails.plaidAccessToken,
-      bankDetails.plaidAccountId,
+      decryptedAccessToken,
+      decryptedAccountId,
       processor,
     );
 

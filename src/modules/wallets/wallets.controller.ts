@@ -1,4 +1,4 @@
-import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, UseGuards, ForbiddenException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { WalletsService } from './wallets.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -17,9 +17,12 @@ export class WalletsController {
     return this.walletsService.getWalletByUserId(userId);
   }
 
-  @ApiOperation({ summary: 'Get Wallet & Ledger transactions by Wallet ID' })
+  @ApiOperation({ summary: 'Get Wallet & Ledger transactions by Wallet ID (Owned by authenticated user)' })
   @Get(':walletId/ledger')
-  async getWalletLedger(@Param('walletId') walletId: string) {
-    return this.walletsService.getLedgerHistory(walletId);
+  async getWalletLedger(
+    @Param('walletId') walletId: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.walletsService.getLedgerHistory(walletId, userId);
   }
 }

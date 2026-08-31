@@ -61,4 +61,15 @@ export class CybridConfigService {
   get isSandbox(): boolean {
     return this.environment === 'sandbox';
   }
+
+  validateOrThrow(): void {
+    const missing: string[] = [];
+    if (!this.clientId) missing.push('CYBRID_CLIENT_ID');
+    if (!this.clientSecret) missing.push('CYBRID_CLIENT_SECRET');
+    if (!this.bankGuid) missing.push('CYBRID_BANK_GUID');
+
+    if (missing.length > 0) {
+      throw new Error(`Cybrid credentials missing: ${missing.join(', ')}`);
+    }
+  }
 }

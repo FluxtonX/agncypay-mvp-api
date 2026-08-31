@@ -31,17 +31,12 @@ export class CybridWebhookService {
 
     this.logger.log(`Received Cybrid webhook event [${eventId}]: ${eventType}`);
 
-    // 1. Signature check (if signature provided or in production)
+    // 1. Signature check (if signature provided)
     if (signature) {
       const isValid = this.cybridProvider.verifyWebhookSignature(payloadStr, signature);
       if (!isValid) {
-        const isSandbox = process.env.CYBRID_ENVIRONMENT !== 'production';
-        if (isSandbox) {
-          this.logger.warn(`Webhook signature mismatch in sandbox mode for event ${eventId} — proceeding with event processing.`);
-        } else {
-          this.logger.error(`Webhook signature verification failed for event ${eventId}`);
-          throw new Error('Invalid webhook signature');
-        }
+        this.logger.error(`Webhook signature verification failed for event ${eventId}`);
+        throw new Error('Invalid webhook signature');
       }
     }
 
@@ -67,6 +62,10 @@ export class CybridWebhookService {
         await this.handleTransferEvent(event);
       } else if (eventType.startsWith('trade.')) {
         await this.handleTradeEvent(event);
+      } else if (eventType.startsWith('execution.')) {
+        await this.handleExecutionEvent(event);
+      } else if (eventType.startsWith('plan.')) {
+        await this.handlePlanEvent(event);
       } else if (eventType.startsWith('identity_verification.')) {
         await this.handleIdentityVerificationEvent(event);
       } else if (eventType.startsWith('customer.')) {
@@ -151,7 +150,7 @@ export class CybridWebhookService {
         payment = await this.prisma.payment.findFirst({
           where: {
             agencyId: agencyUserId,
-            status: 'PENDING_FUNDING',
+            status: { in: ['PENDING_FUNDING', 'FUNDED'] },
           },
           orderBy: { createdAt: 'desc' },
         });
@@ -159,8 +158,14 @@ export class CybridWebhookService {
     }
 
     if (payment) {
+      // Out-of-order check: if payment is already COMPLETED and incoming is not RETURNED, skip
+      if (payment.status === 'COMPLETED' && action !== 'returned') {
+        this.logger.log(`Payment ${payment.id} is already in COMPLETED state. Ignoring duplicate/stale transfer event.`);
+        return;
+      }
+
       if (action === 'completed' || action === 'settled') {
-        // Transition payment state
+        // Transition payment state to COMPLETED
         await this.paymentStateService.transition(payment.id, 'COMPLETED', {
           providerRef: transferGuid,
         });
@@ -172,25 +177,36 @@ export class CybridWebhookService {
           });
         }
 
-        // Post double-entry journal entry
-        // Debit: CLEARING:CYBRID_DEPOSIT:USD
-        // Credit: AGENCY:{agencyId}:USD
-        await this.ledgerService.postJournalEntry({
-          debitAccountCode: `CLEARING:CYBRID_DEPOSIT:USD`,
-          creditAccountCode: `AGENCY:${payment.agencyId}:USD`,
-          amount: payment.amount,
-          currency: payment.currency,
-          referenceType: 'BRAND_PAYMENT_FUNDED_WEBHOOK',
-          referenceId: payment.id,
-          providerReference: transferGuid || payment.cybridDepositRef || undefined,
-          description: `Confirmed inbound payment ${payment.paymentNumber} via Cybrid deposit webhook`,
+        // Idempotent double-entry journal entry check
+        const existingEntry = await this.prisma.journalEntry.findFirst({
+          where: {
+            referenceId: payment.id,
+            referenceType: { in: ['BRAND_PAYMENT_FUNDED', 'BRAND_PAYMENT_FUNDED_WEBHOOK'] },
+            status: 'posted',
+          },
         });
+
+        if (!existingEntry) {
+          // Post double-entry journal entry
+          // Debit: CLEARING:CYBRID_DEPOSIT:USD
+          // Credit: AGENCY:{agencyId}:USD
+          await this.ledgerService.postJournalEntry({
+            debitAccountCode: `CLEARING:CYBRID_DEPOSIT:USD`,
+            creditAccountCode: `AGENCY:${payment.agencyId}:USD`,
+            amount: Number(payment.amount),
+            currency: payment.currency,
+            referenceType: 'BRAND_PAYMENT_FUNDED_WEBHOOK',
+            referenceId: payment.id,
+            providerReference: transferGuid || payment.cybridDepositRef || undefined,
+            description: `Confirmed inbound payment ${payment.paymentNumber} via Cybrid deposit webhook`,
+          });
+        }
 
         // Update linked invoice if present
         if (payment.invoiceId) {
           await this.prisma.invoice.update({
             where: { id: payment.invoiceId },
-            data: { status: 'paid', payoutStatus: 'disbursed' },
+            data: { status: 'paid' },
           });
         }
 
@@ -217,9 +233,28 @@ export class CybridWebhookService {
     });
 
     if (payout) {
+      // Out-of-order check: if payout already in terminal state, ignore forward event
+      if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(payout.status) && action !== 'returned') {
+        this.logger.log(`Payout ${payout.id} is already in ${payout.status}. Ignoring stale transfer event.`);
+        return;
+      }
+
       if (action === 'completed' || action === 'settled') {
         await this.payoutStateService.transition(payout.id, 'COMPLETED', {
           providerRef: transferGuid,
+        });
+
+        // Promote pending reservation to posted
+        await this.prisma.journalEntry.updateMany({
+          where: {
+            referenceId: payout.id,
+            referenceType: 'DOMESTIC_TALENT_PAYOUT',
+            status: 'pending',
+          },
+          data: {
+            status: 'posted',
+            providerReference: transferGuid,
+          },
         });
       } else if (action === 'failed' || action === 'returned') {
         await this.payoutStateService.transition(payout.id, action === 'failed' ? 'FAILED' : 'RETURNED', {
@@ -228,17 +263,37 @@ export class CybridWebhookService {
           providerRef: transferGuid,
         });
 
-        // Reversal entry to return funds to Agency ledger
-        await this.ledgerService.postJournalEntry({
-          debitAccountCode: `CLEARING:CYBRID_OUTBOUND:USD`,
-          creditAccountCode: `AGENCY:${payout.agencyId}:USD`,
-          amount: payout.amount,
-          currency: payout.currency,
-          referenceType: 'PAYOUT_REVERSAL',
-          referenceId: payout.id,
-          providerReference: transferGuid,
-          description: `Reversal of failed payout ${payout.payoutNumber}`,
+        // If pending, mark reversed; if already posted, post explicit refund/reversal entry
+        const pendingCount = await this.prisma.journalEntry.count({
+          where: {
+            referenceId: payout.id,
+            referenceType: 'DOMESTIC_TALENT_PAYOUT',
+            status: 'pending',
+          },
         });
+
+        if (pendingCount > 0) {
+          await this.prisma.journalEntry.updateMany({
+            where: {
+              referenceId: payout.id,
+              referenceType: 'DOMESTIC_TALENT_PAYOUT',
+              status: 'pending',
+            },
+            data: { status: 'reversed' },
+          });
+        } else {
+          // Reversal entry to return funds to Agency ledger
+          await this.ledgerService.postJournalEntry({
+            debitAccountCode: `CLEARING:CYBRID_OUTBOUND:USD`,
+            creditAccountCode: `AGENCY:${payout.agencyId}:USD`,
+            amount: Number(payout.amount),
+            currency: payout.currency,
+            referenceType: 'PAYOUT_REVERSAL',
+            referenceId: payout.id,
+            providerReference: transferGuid,
+            description: `Reversal of failed payout ${payout.payoutNumber}`,
+          });
+        }
 
         // Sync legacy Wallet balance if exists
         await this.syncLegacyWalletBalance(payout.agencyId);
@@ -255,9 +310,27 @@ export class CybridWebhookService {
     });
 
     if (payout) {
+      if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(payout.status)) {
+        this.logger.log(`Payout ${payout.id} is already in ${payout.status}. Ignoring trade event.`);
+        return;
+      }
+
       if (action === 'completed' || action === 'settled') {
         await this.payoutStateService.transition(payout.id, 'TRADE_COMPLETED', {
           providerRef: tradeGuid,
+        });
+
+        // Promote pending FX trade reservation to posted
+        await this.prisma.journalEntry.updateMany({
+          where: {
+            referenceId: payout.id,
+            referenceType: 'FX_TRADE_USD_TO_USDC',
+            status: 'pending',
+          },
+          data: {
+            status: 'posted',
+            providerReference: tradeGuid,
+          },
         });
       } else if (action === 'failed') {
         await this.payoutStateService.transition(payout.id, 'FAILED', {
@@ -266,16 +339,102 @@ export class CybridWebhookService {
           providerRef: tradeGuid,
         });
 
-        // Reversal entry to return funds to Agency ledger from trading account
+        // Reverse the pending reservation
+        await this.prisma.journalEntry.updateMany({
+          where: {
+            referenceId: payout.id,
+            referenceType: 'FX_TRADE_USD_TO_USDC',
+            status: 'pending',
+          },
+          data: { status: 'reversed' },
+        });
+
+        await this.syncLegacyWalletBalance(payout.agencyId);
+      }
+    }
+  }
+
+  private async handleExecutionEvent(event: any) {
+    const executionGuid = event.object_guid || event.guid || event.execution_guid;
+    const planGuid = event.plan_guid;
+    const action = event.action || event.status || (event.event_type ? event.event_type.split('.')[1] : 'completed');
+
+    const payout = await this.prisma.paymentPayout.findFirst({
+      where: {
+        OR: [
+          ...(executionGuid ? [{ cybridExecutionGuid: executionGuid }] : []),
+          ...(planGuid ? [{ cybridPlanGuid: planGuid }] : []),
+        ],
+      },
+    });
+
+    if (payout) {
+      if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(payout.status) && action !== 'returned') {
+        this.logger.log(`Payout ${payout.id} is already in ${payout.status}. Ignoring execution event.`);
+        return;
+      }
+
+      if (action === 'completed' || action === 'settled') {
+        if (payout.status === 'REMITTANCE_PENDING' || payout.status === 'EXECUTION_PENDING') {
+          await this.payoutStateService.transition(payout.id, 'REMITTANCE_PROCESSING', {
+            providerRef: executionGuid,
+          });
+        }
+        await this.payoutStateService.transition(payout.id, 'REMITTANCE_COMPLETED', {
+          providerRef: executionGuid,
+        });
+        await this.payoutStateService.transition(payout.id, 'COMPLETED', {
+          providerRef: executionGuid,
+        });
+      } else if (action === 'failed' || action === 'returned') {
+        await this.payoutStateService.transition(payout.id, action === 'failed' ? 'FAILED' : 'RETURNED', {
+          reason: event.failure_code || 'Remittance execution failed',
+          stage: 'REMITTANCE_EXECUTION',
+          providerRef: executionGuid,
+        });
+
+        // Reversal entry: USDC_TRADING -> USD
         await this.ledgerService.postJournalEntry({
           debitAccountCode: `AGENCY:${payout.agencyId}:USDC_TRADING`,
           creditAccountCode: `AGENCY:${payout.agencyId}:USD`,
-          amount: payout.amount,
-          currency: payout.currency,
-          referenceType: 'TRADE_REVERSAL',
+          amount: Number(payout.amount),
+          currency: 'USD',
+          referenceType: 'REMITTANCE_REVERSAL',
           referenceId: payout.id,
-          providerReference: tradeGuid,
-          description: `Reversal of failed FX trade for payout ${payout.payoutNumber}`,
+          providerReference: executionGuid,
+          description: `Reversal of failed remittance execution for payout ${payout.payoutNumber}`,
+        });
+
+        await this.syncLegacyWalletBalance(payout.agencyId);
+      }
+    }
+  }
+
+  private async handlePlanEvent(event: any) {
+    const planGuid = event.object_guid || event.guid || event.plan_guid;
+    const action = event.action || event.status || (event.event_type ? event.event_type.split('.')[1] : 'completed');
+
+    const payout = await this.prisma.paymentPayout.findFirst({
+      where: { cybridPlanGuid: planGuid },
+    });
+
+    if (payout) {
+      if (action === 'failed') {
+        await this.payoutStateService.transition(payout.id, 'FAILED', {
+          reason: event.failure_code || 'Remittance plan creation failed',
+          stage: 'REMITTANCE_PLAN',
+          providerRef: planGuid,
+        });
+
+        await this.ledgerService.postJournalEntry({
+          debitAccountCode: `AGENCY:${payout.agencyId}:USDC_TRADING`,
+          creditAccountCode: `AGENCY:${payout.agencyId}:USD`,
+          amount: Number(payout.amount),
+          currency: 'USD',
+          referenceType: 'PLAN_REVERSAL',
+          referenceId: payout.id,
+          providerReference: planGuid,
+          description: `Reversal of failed remittance plan for payout ${payout.payoutNumber}`,
         });
 
         await this.syncLegacyWalletBalance(payout.agencyId);

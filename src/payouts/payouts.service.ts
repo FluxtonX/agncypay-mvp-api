@@ -1,12 +1,14 @@
-import { Injectable, NotFoundException, BadRequestException, Logger, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, BadGatewayException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
 import { LedgerService } from '../modules/ledger/ledger.service';
 import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
 import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
+import { ExternalBankAccountService } from '../modules/cybrid/external-bank-account.service';
 import { PayoutStateService } from '../modules/payouts/payout-state.service';
 import { CybridConfigService } from '../infrastructure/providers/cybrid/cybrid-config.service';
 import type { IFinancialProvider } from '../core/interfaces/financial-provider.interface';
+import { toDecimal } from '../common/utils/decimal.util';
 import { PayoutStatus } from '@prisma/client';
 
 @Injectable()
@@ -19,6 +21,7 @@ export class PayoutsService {
     private readonly ledgerService: LedgerService,
     private readonly customerService: CybridCustomerService,
     private readonly accountService: CybridAccountService,
+    private readonly externalBankAccountService: ExternalBankAccountService,
     private readonly payoutStateService: PayoutStateService,
     private readonly config: CybridConfigService,
     @Inject('IFinancialProvider') private readonly cybridProvider: IFinancialProvider,
@@ -27,6 +30,11 @@ export class PayoutsService {
   /**
    * ─── 1. Domestic Talent Payout ───────────────────────────────────
    * Agency USD Fiat Account → Cybrid Quote → Cybrid Transfer → Talent Counterparty Bank
+   *
+   * Financial correctness:
+   * - Balance reservation is ATOMIC (pending journal entry inside DB transaction)
+   * - Ledger entry starts as 'pending', promoted to 'posted' only on webhook confirmation
+   * - Payout stays in TRANSFER_PENDING until Cybrid webhook confirms completion/failure
    */
   async requestDomesticTalentPayout(data: {
     agencyId: string;
@@ -52,16 +60,15 @@ export class PayoutsService {
       }
     }
 
-    // 2. Validate Agency balance
+    // 2. Validate Agency balance using Decimal comparison (not float)
     const agencyAccountCode = `AGENCY:${data.agencyId}:USD`;
     const ledgerBalance = await this.ledgerService.getAccountBalance(agencyAccountCode);
+    const availableDec = toDecimal(ledgerBalance.balance);
+    const requestedDec = toDecimal(data.amount);
 
-    // Fallback check for simulated balance if sandbox testing without funding
-    const availableBalance = ledgerBalance.balance > 0 ? ledgerBalance.balance : 50000;
-
-    if (availableBalance < data.amount) {
+    if (availableDec.lessThan(requestedDec)) {
       throw new BadRequestException(
-        `Insufficient available Agency balance ($${availableBalance.toFixed(2)}) for payout of $${data.amount.toFixed(2)}`,
+        `Insufficient available Agency balance ($${availableDec.toFixed(2)}) for payout of $${requestedDec.toFixed(2)}`,
       );
     }
 
@@ -95,72 +102,115 @@ export class PayoutsService {
 
     const payoutNumber = `PO-DOM-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    // 5. Create Payout record in DB
-    const payout = await this.prisma.paymentPayout.create({
-      data: {
-        payoutNumber,
-        agencyId: data.agencyId,
-        talentId: data.talentId,
-        paymentId: data.paymentId,
-        amount: data.amount,
-        currency: data.currency || 'USD',
-        payoutType: 'domestic',
-        status: 'VALIDATING',
-        destinationAccountGuid: externalBank.cybridExternalBankGuid,
-        idempotencyKey: data.idempotencyKey,
-        metadata: data.metadata || {},
-      },
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
+    // 5. ATOMIC: Create payout record + reserve funds via pending journal entry in a transaction
+    const payout = await this.prisma.$transaction(async (tx) => {
+      // Re-check balance inside the transaction for concurrency safety
+      const account = await tx.ledgerAccount.findUnique({
+        where: { accountCode: agencyAccountCode },
+      });
+
+      if (account) {
+        const debits = await tx.journalEntry.aggregate({
+          where: { debitAccountId: account.id, status: { in: ['posted', 'pending'] } },
+          _sum: { amount: true },
+        });
+        const credits = await tx.journalEntry.aggregate({
+          where: { creditAccountId: account.id, status: { in: ['posted', 'pending'] } },
+          _sum: { amount: true },
+        });
+        // Liability account: balance = credits - debits
+        const debitDec = toDecimal(debits._sum.amount);
+        const creditDec = toDecimal(credits._sum.amount);
+        const effectiveBalance = creditDec.minus(debitDec);
+
+        if (effectiveBalance.lessThan(requestedDec)) {
+          throw new BadRequestException(
+            `Insufficient balance after considering pending reservations: $${effectiveBalance.toFixed(2)} available`,
+          );
+        }
+      }
+
+      // Create payout record
+      const newPayout = await tx.paymentPayout.create({
+        data: {
+          payoutNumber,
+          agencyId: data.agencyId,
+          talentId: data.talentId,
+          paymentId: data.paymentId,
+          amount: data.amount as any,
+          currency: data.currency || 'USD',
+          payoutType: 'domestic',
+          status: 'RESERVED',
+          destinationAccountGuid: externalBank.cybridExternalBankGuid,
+          idempotencyKey: data.idempotencyKey,
+          metadata: data.metadata || {},
+        },
+      });
+
+      // Post PENDING journal entry (reservation — not finalized until webhook)
+      const debitAccount = await this.ledgerService.getOrCreateAccount({ accountCode: agencyAccountCode });
+      const creditAccount = await this.ledgerService.getOrCreateAccount({ accountCode: `CLEARING:CYBRID_OUTBOUND:USD` });
+
+      await tx.journalEntry.create({
+        data: {
+          debitAccountId: debitAccount.id,
+          creditAccountId: creditAccount.id,
+          amount: requestedDec,
+          currency: data.currency || 'USD',
+          status: 'pending',
+          referenceType: 'DOMESTIC_TALENT_PAYOUT',
+          referenceId: newPayout.id,
+          description: `[PENDING] Domestic payout ${payoutNumber} reservation for Talent ${talent.fullName}`,
+        },
+      });
+
+      return newPayout;
     });
 
+    // 6. Execute Cybrid quote + transfer (outside the DB transaction)
     let quoteGuid: string;
     let transferGuid: string;
 
     try {
-      if (this.config.isConfigured) {
-        // Create Cybrid Quote for domestic funding transfer
-        await this.payoutStateService.transition(payout.id, 'QUOTE_PENDING');
+      await this.payoutStateService.transition(payout.id, 'VALIDATING');
+      await this.payoutStateService.transition(payout.id, 'QUOTE_PENDING');
 
-        const quote = await this.cybridProvider.createQuote({
-          customerGuid: agencyCustomer.cybridCustomerGuid,
-          productType: 'funding',
-          asset: 'USD',
-          side: 'withdrawal',
-          deliverAmount: Math.round(data.amount * 100), // Cybrid integer cents
-        });
-        quoteGuid = quote.guid;
+      const quote = await this.cybridProvider.createQuote({
+        customerGuid: agencyCustomer.cybridCustomerGuid,
+        productType: 'funding',
+        asset: 'USD',
+        side: 'withdrawal',
+        deliverAmount: Math.round(data.amount * 100), // Cybrid integer cents
+      });
+      quoteGuid = quote.guid;
 
-        // Execute Transfer
-        await this.payoutStateService.transition(payout.id, 'TRANSFER_PENDING');
+      await this.payoutStateService.transition(payout.id, 'TRANSFER_PENDING');
 
-        const transfer = await this.cybridProvider.createTransfer({
-          quoteGuid: quote.guid,
-          transferType: 'funding',
-          sourceAccountGuid: agencyUsdAccount.cybridAccountGuid,
-          externalBankAccountGuid: externalBank.cybridExternalBankGuid,
-        });
-        transferGuid = transfer.guid;
-      } else {
-        quoteGuid = `quo_cyb_${Date.now()}`;
-        transferGuid = `tra_cyb_${Date.now()}`;
-        await this.payoutStateService.transition(payout.id, 'TRANSFER_PENDING');
-      }
+      const transfer = await this.cybridProvider.createTransfer({
+        quoteGuid: quote.guid,
+        transferType: 'funding',
+        sourceAccountGuid: agencyUsdAccount.cybridAccountGuid,
+        externalBankAccountGuid: externalBank.cybridExternalBankGuid,
+      });
+      transferGuid = transfer.guid;
     } catch (err) {
-      if (this.config.isSandbox) {
-        this.logger.warn(`Cybrid API sandbox transfer note (${err.message}), utilizing sandbox reference`);
-        quoteGuid = `quo_cyb_${Date.now()}`;
-        transferGuid = `tra_cyb_${Date.now()}`;
-        await this.payoutStateService.transition(payout.id, 'TRANSFER_PENDING');
-      } else {
-        this.logger.error(`Domestic payout execution failed: ${err.message}`);
-        await this.payoutStateService.transition(payout.id, 'FAILED', {
-          reason: err.message,
-          stage: 'TRANSFER_EXECUTION',
-        });
-        throw new BadRequestException(`Payout transfer failed: ${err.message}`);
-      }
+      this.logger.error(`Domestic payout execution failed: ${err.message}`);
+
+      // Reverse the pending reservation
+      await this.reversePendingReservation(payout.id, 'DOMESTIC_TALENT_PAYOUT');
+
+      await this.payoutStateService.transition(payout.id, 'FAILED', {
+        reason: err.message,
+        stage: 'TRANSFER_EXECUTION',
+      });
+      throw new BadGatewayException(`Payout transfer failed: ${err.message}`);
     }
 
-    // Save references
+    // 7. Save Cybrid references
     const updatedPayout = await this.prisma.paymentPayout.update({
       where: { id: payout.id },
       data: {
@@ -180,19 +230,9 @@ export class PayoutsService {
       },
     });
 
-    // Post double-entry journal entry:
-    // Debit: Agency USD balance
-    // Credit: Outbound clearing account
-    await this.ledgerService.postJournalEntry({
-      debitAccountCode: agencyAccountCode,
-      creditAccountCode: `CLEARING:CYBRID_OUTBOUND:USD`,
-      amount: data.amount,
-      currency: data.currency || 'USD',
-      referenceType: 'DOMESTIC_TALENT_PAYOUT',
-      referenceId: payout.id,
-      providerReference: transferGuid,
-      description: `Domestic payout ${payoutNumber} to Talent ${talent.fullName}`,
-    });
+    // NOTE: Ledger entry remains in 'pending' status.
+    // It will be promoted to 'posted' when the Cybrid webhook confirms transfer.completed.
+    // If webhook reports transfer.failed, the pending entry will be reversed.
 
     await this.syncLegacyWalletBalance(data.agencyId);
 
@@ -215,6 +255,12 @@ export class PayoutsService {
   /**
    * ─── 2. International Talent Payout ──────────────────────────────
    * Agency USD → Quote (USD → USDC) → Trade → Agency USDC Account → Remittance Plan → Execution → Talent Bank
+   *
+   * Financial correctness:
+   * - Balance reservation is ATOMIC (pending journal entry inside DB transaction)
+   * - Trade completion is NOT assumed synchronously — waits for webhook
+   * - FX ledger entry deferred until trade.completed webhook
+   * - Remittance completion tracked through execution webhooks
    */
   async requestInternationalTalentPayout(data: {
     agencyId: string;
@@ -237,14 +283,15 @@ export class PayoutsService {
       if (existing) return existing;
     }
 
-    // 2. Validate Agency balance
+    // 2. Validate Agency balance using Decimal comparison
     const agencyAccountCode = `AGENCY:${data.agencyId}:USD`;
     const ledgerBalance = await this.ledgerService.getAccountBalance(agencyAccountCode);
-    const availableBalance = ledgerBalance.balance > 0 ? ledgerBalance.balance : 50000;
+    const availableDec = toDecimal(ledgerBalance.balance);
+    const requestedDec = toDecimal(data.amount);
 
-    if (availableBalance < data.amount) {
+    if (availableDec.lessThan(requestedDec)) {
       throw new BadRequestException(
-        `Insufficient available balance ($${availableBalance.toFixed(2)}) for international payout of $${data.amount.toFixed(2)}`,
+        `Insufficient available balance ($${availableDec.toFixed(2)}) for international payout of $${requestedDec.toFixed(2)}`,
       );
     }
 
@@ -269,103 +316,113 @@ export class PayoutsService {
 
     const payoutNumber = `PO-INTL-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    const payout = await this.prisma.paymentPayout.create({
-      data: {
-        payoutNumber,
-        agencyId: data.agencyId,
-        talentId: data.talentId,
-        paymentId: data.paymentId,
-        amount: data.amount,
-        currency: 'USD',
-        destinationCurrency: data.destinationCurrency || 'EUR',
-        payoutType: 'international',
-        status: 'VALIDATING',
-        destinationAccountGuid: externalBank?.cybridExternalBankGuid,
-        idempotencyKey: data.idempotencyKey,
-        metadata: data.metadata || {},
-      },
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
+    // 5. ATOMIC: Create payout record + reserve funds
+    const payout = await this.prisma.$transaction(async (tx) => {
+      const account = await tx.ledgerAccount.findUnique({
+        where: { accountCode: agencyAccountCode },
+      });
+
+      if (account) {
+        const debits = await tx.journalEntry.aggregate({
+          where: { debitAccountId: account.id, status: { in: ['posted', 'pending'] } },
+          _sum: { amount: true },
+        });
+        const credits = await tx.journalEntry.aggregate({
+          where: { creditAccountId: account.id, status: { in: ['posted', 'pending'] } },
+          _sum: { amount: true },
+        });
+        const debitDec = toDecimal(debits._sum.amount);
+        const creditDec = toDecimal(credits._sum.amount);
+        const effectiveBalance = creditDec.minus(debitDec);
+
+        if (effectiveBalance.lessThan(requestedDec)) {
+          throw new BadRequestException(
+            `Insufficient balance after considering pending reservations: $${effectiveBalance.toFixed(2)} available`,
+          );
+        }
+      }
+
+      const newPayout = await tx.paymentPayout.create({
+        data: {
+          payoutNumber,
+          agencyId: data.agencyId,
+          talentId: data.talentId,
+          paymentId: data.paymentId,
+          amount: data.amount as any,
+          currency: 'USD',
+          destinationCurrency: data.destinationCurrency || 'EUR',
+          payoutType: 'international',
+          status: 'RESERVED',
+          destinationAccountGuid: externalBank?.cybridExternalBankGuid,
+          idempotencyKey: data.idempotencyKey,
+          metadata: data.metadata || {},
+        },
+      });
+
+      // Pending reservation journal entry (USD side)
+      const debitAccount = await this.ledgerService.getOrCreateAccount({ accountCode: agencyAccountCode });
+      const creditAccount = await this.ledgerService.getOrCreateAccount({ accountCode: `AGENCY:${data.agencyId}:USDC_TRADING` });
+
+      await tx.journalEntry.create({
+        data: {
+          debitAccountId: debitAccount.id,
+          creditAccountId: creditAccount.id,
+          amount: requestedDec,
+          currency: 'USD',
+          status: 'pending',
+          referenceType: 'FX_TRADE_USD_TO_USDC',
+          referenceId: newPayout.id,
+          description: `[PENDING] FX trade reservation for International Payout ${payoutNumber}`,
+        },
+      });
+
+      return newPayout;
     });
 
+    // 6. Execute Cybrid quote + trade (outside DB transaction)
     let quoteGuid: string;
     let tradeGuid: string;
-    let fxRate = 1.0;
 
     try {
-      if (this.config.isConfigured) {
-        // Step 1: Create FX Quote (USD -> USDC)
-        await this.payoutStateService.transition(payout.id, 'QUOTE_PENDING');
+      await this.payoutStateService.transition(payout.id, 'VALIDATING');
+      await this.payoutStateService.transition(payout.id, 'QUOTE_PENDING');
 
-        const quote = await this.cybridProvider.createQuote({
-          customerGuid: agencyCustomer.cybridCustomerGuid,
-          productType: 'trading',
-          symbol: 'USDC-USD',
-          side: 'buy',
-          deliverAmount: Math.round(data.amount * 100),
-        });
-        quoteGuid = quote.guid;
+      const quote = await this.cybridProvider.createQuote({
+        customerGuid: agencyCustomer.cybridCustomerGuid,
+        productType: 'trading',
+        symbol: 'USDC-USD',
+        side: 'buy',
+        deliverAmount: Math.round(data.amount * 100),
+      });
+      quoteGuid = quote.guid;
 
-        // Step 2: Execute Trade (USD -> USDC)
-        await this.payoutStateService.transition(payout.id, 'TRADE_PENDING');
+      // Execute Trade — status will be 'storing' initially, NOT completed
+      await this.payoutStateService.transition(payout.id, 'TRADE_PENDING');
 
-        const trade = await this.cybridProvider.createTrade({
-          quoteGuid: quote.guid,
-        });
-        tradeGuid = trade.guid;
+      const trade = await this.cybridProvider.createTrade({
+        quoteGuid: quote.guid,
+      });
+      tradeGuid = trade.guid;
 
-        // Step 3: Transition to TRADE_COMPLETED
-        await this.payoutStateService.transition(payout.id, 'TRADE_COMPLETED');
+      // *** DO NOT transition to TRADE_COMPLETED here ***
+      // Trade completion is confirmed ONLY by the trade.completed webhook.
+      // The payout stays in TRADE_PENDING until that webhook arrives.
 
-        // Step 4: Create Remittance Plan & Execution if destination external bank exists
-        if (externalBank) {
-          await this.payoutStateService.transition(payout.id, 'REMITTANCE_PENDING');
-          const agencyTradingAccount = await this.accountService.ensureTradingAccount(data.agencyId);
-
-          const plan = await this.cybridProvider.createPlan({
-            type: 'remittance',
-            customerGuid: agencyCustomer.cybridCustomerGuid,
-            sourceAccount: {
-              type: 'customer',
-              guid: agencyTradingAccount.cybridAccountGuid,
-            },
-            destinationAccount: {
-              type: 'customer',
-              guid: externalBank.cybridExternalBankGuid,
-            },
-            purposeOfTransaction: 'salary_payment',
-          });
-
-          await this.payoutStateService.transition(payout.id, 'EXECUTION_PENDING');
-          const execution = await this.cybridProvider.createExecution({
-            planGuid: plan.guid,
-          });
-
-          await this.prisma.paymentPayout.update({
-            where: { id: payout.id },
-            data: {
-              cybridPlanGuid: plan.guid,
-              cybridExecutionGuid: execution.guid,
-            },
-          });
-        }
-      } else {
-        quoteGuid = `quo_fx_${Date.now()}`;
-        tradeGuid = `tra_fx_${Date.now()}`;
-        await this.payoutStateService.transition(payout.id, 'TRADE_COMPLETED');
-      }
     } catch (err) {
-      if (this.config.isSandbox) {
-        this.logger.warn(`Cybrid trade sandbox call note (${err.message}), utilizing sandbox fallback`);
-        quoteGuid = `quo_fx_${Date.now()}`;
-        tradeGuid = `tra_fx_${Date.now()}`;
-        await this.payoutStateService.transition(payout.id, 'TRADE_COMPLETED');
-      } else {
-        this.logger.error(`International trade execution failed: ${err.message}`);
-        await this.payoutStateService.transition(payout.id, 'FAILED', {
-          reason: err.message,
-          stage: 'FX_TRADE',
-        });
-        throw new BadRequestException(`International trade step failed: ${err.message}`);
-      }
+      this.logger.error(`International trade execution failed: ${err.message}`);
+
+      // Reverse pending reservation
+      await this.reversePendingReservation(payout.id, 'FX_TRADE_USD_TO_USDC');
+
+      await this.payoutStateService.transition(payout.id, 'FAILED', {
+        reason: err.message,
+        stage: 'FX_TRADE',
+      });
+      throw new BadGatewayException(`International trade step failed: ${err.message}`);
     }
 
     const updatedPayout = await this.prisma.paymentPayout.update({
@@ -373,22 +430,25 @@ export class PayoutsService {
       data: {
         cybridQuoteGuid: quoteGuid,
         cybridTradeGuid: tradeGuid,
-        fxRate,
       },
     });
 
-    // Double-Entry Ledger entries:
-    // 1. Move USD to USDC trading
-    await this.ledgerService.postJournalEntry({
-      debitAccountCode: agencyAccountCode,
-      creditAccountCode: `AGENCY:${data.agencyId}:USDC_TRADING`,
-      amount: data.amount,
-      currency: 'USD',
-      referenceType: 'FX_TRADE_USD_TO_USDC',
-      referenceId: payout.id,
-      providerReference: tradeGuid,
-      description: `FX trade USD -> USDC for International Payout ${payoutNumber}`,
+    // Record Provider Operations
+    await this.prisma.providerOperation.create({
+      data: {
+        provider: 'cybrid',
+        operationType: 'trade',
+        operationGuid: tradeGuid,
+        payoutId: payout.id,
+        status: 'pending',
+      },
     });
+
+    // NOTE: Ledger entry remains 'pending' until trade.completed webhook.
+    // On trade.completed, the webhook handler will:
+    //   1. Promote the pending entry to 'posted'
+    //   2. Transition payout to TRADE_COMPLETED
+    //   3. Initiate remittance plan if applicable
 
     await this.syncLegacyWalletBalance(data.agencyId);
 
@@ -438,53 +498,88 @@ export class PayoutsService {
 
     const agencyAccountCode = `AGENCY:${data.agencyId}:USD`;
     const ledgerBal = await this.ledgerService.getAccountBalance(agencyAccountCode);
-    const available = ledgerBal.balance > 0 ? ledgerBal.balance : 50000;
+    const availableDec = toDecimal(ledgerBal.balance);
+    const requestedDec = toDecimal(data.amount);
 
-    if (available < data.amount) {
-      throw new BadRequestException(`Insufficient balance ($${available.toFixed(2)}) for withdrawal of $${data.amount.toFixed(2)}`);
+    if (availableDec.lessThan(requestedDec)) {
+      throw new BadRequestException(`Insufficient balance ($${availableDec.toFixed(2)}) for withdrawal of $${requestedDec.toFixed(2)}`);
     }
 
     const payoutNumber = `WD-AGY-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    const payout = await this.prisma.paymentPayout.create({
-      data: {
-        payoutNumber,
-        agencyId: data.agencyId,
-        amount: data.amount,
-        currency: 'USD',
-        payoutType: 'agency_withdrawal',
-        status: 'TRANSFER_PENDING',
-        destinationAccountGuid: extAccount.providerExternalAccountId,
-        metadata: {
-          accountName: extAccount.accountName,
-          paymentType: data.paymentType || 'ach',
+    // ATOMIC reservation
+    const payout = await this.prisma.$transaction(async (tx) => {
+      const account = await tx.ledgerAccount.findUnique({
+        where: { accountCode: agencyAccountCode },
+      });
+
+      if (account) {
+        const debits = await tx.journalEntry.aggregate({
+          where: { debitAccountId: account.id, status: { in: ['posted', 'pending'] } },
+          _sum: { amount: true },
+        });
+        const credits = await tx.journalEntry.aggregate({
+          where: { creditAccountId: account.id, status: { in: ['posted', 'pending'] } },
+          _sum: { amount: true },
+        });
+        const debitDec = toDecimal(debits._sum.amount);
+        const creditDec = toDecimal(credits._sum.amount);
+        const effectiveBalance = creditDec.minus(debitDec);
+
+        if (effectiveBalance.lessThan(requestedDec)) {
+          throw new BadRequestException(
+            `Insufficient balance after considering pending reservations: $${effectiveBalance.toFixed(2)} available`,
+          );
+        }
+      }
+
+      const newPayout = await tx.paymentPayout.create({
+        data: {
+          payoutNumber,
+          agencyId: data.agencyId,
+          amount: data.amount as any,
+          currency: 'USD',
+          payoutType: 'agency_withdrawal',
+          status: 'RESERVED',
+          destinationAccountGuid: extAccount.providerExternalAccountId,
+          metadata: {
+            accountName: extAccount.accountName,
+            paymentType: data.paymentType || 'ach',
+          },
         },
-      },
+      });
+
+      // Pending reservation journal
+      const debitAccount = await this.ledgerService.getOrCreateAccount({ accountCode: agencyAccountCode });
+      const creditAccount = await this.ledgerService.getOrCreateAccount({ accountCode: `CLEARING:CYBRID_WITHDRAWAL:USD` });
+
+      await tx.journalEntry.create({
+        data: {
+          debitAccountId: debitAccount.id,
+          creditAccountId: creditAccount.id,
+          amount: requestedDec,
+          currency: 'USD',
+          status: 'pending',
+          referenceType: 'AGENCY_SELF_WITHDRAWAL',
+          referenceId: newPayout.id,
+          description: `[PENDING] Agency self-withdrawal to ${extAccount.bankName} (${extAccount.accountNumberMask})`,
+        },
+      });
+
+      return newPayout;
     });
 
-    // Also create legacy Payout record for backwards compatibility
+    // Create legacy Payout record in pending state for backwards compatibility
     await this.prisma.payout.create({
       data: {
         agencyId: data.agencyId,
-        amount: data.amount,
+        amount: data.amount as any,
         currency: 'USD',
         destinationExternalAccountId: extAccount.id,
         paymentOrderId: payoutNumber,
-        status: 'disbursed',
+        status: 'pending',
         metadata: { accountName: extAccount.accountName, paymentType: data.paymentType || 'ach' },
       },
-    });
-
-    // Post double-entry journal entry
-    await this.ledgerService.postJournalEntry({
-      debitAccountCode: agencyAccountCode,
-      creditAccountCode: `CLEARING:CYBRID_WITHDRAWAL:USD`,
-      amount: data.amount,
-      currency: 'USD',
-      referenceType: 'AGENCY_SELF_WITHDRAWAL',
-      referenceId: payout.id,
-      providerReference: extAccount.providerExternalAccountId,
-      description: `Agency self-withdrawal to ${extAccount.bankName} (${extAccount.accountNumberMask})`,
     });
 
     await this.syncLegacyWalletBalance(data.agencyId);
@@ -510,40 +605,15 @@ export class PayoutsService {
     routingNumber: string;
     isPrimary?: boolean;
   }) {
-    const user = await this.prisma.user.findUnique({ where: { id: data.agencyId } });
-    if (!user) throw new NotFoundException(`Agency ${data.agencyId} not found`);
-
-    const externalAccountId = `eba_cyb_${Date.now()}`;
-    const accountMask = data.accountNumber.length > 4 ? data.accountNumber.slice(-4) : data.accountNumber;
-
-    if (data.isPrimary) {
-      await this.prisma.agencyExternalAccount.updateMany({
-        where: { agencyId: data.agencyId },
-        data: { isPrimary: false },
-      });
-    }
-
-    const extAccount = await this.prisma.agencyExternalAccount.create({
-      data: {
-        agencyId: data.agencyId,
-        accountName: data.accountName,
-        bankName: data.bankName,
-        accountNumberMask: accountMask,
-        routingNumber: data.routingNumber,
-        providerExternalAccountId: externalAccountId,
-        isPrimary: data.isPrimary ?? false,
-      },
+    // Delegate to ExternalBankAccountService for real Cybrid creation
+    return this.externalBankAccountService.linkAgencyBankAccount({
+      agencyId: data.agencyId,
+      accountName: data.accountName,
+      bankName: data.bankName,
+      accountNumber: data.accountNumber,
+      routingNumber: data.routingNumber,
+      isPrimary: data.isPrimary,
     });
-
-    await this.auditLogsService.log({
-      userId: data.agencyId,
-      action: 'AGENCY_EXTERNAL_ACCOUNT_ADDED',
-      entityType: 'AgencyExternalAccount',
-      entityId: extAccount.id,
-      details: { accountName: data.accountName, externalAccountId },
-    });
-
-    return extAccount;
   }
 
   async getAgencyExternalAccounts(agencyId: string) {
@@ -561,6 +631,44 @@ export class PayoutsService {
     });
   }
 
+  /**
+   * Reverse a pending journal entry reservation (e.g., when Cybrid API call fails).
+   * This does NOT create a reversal entry — it simply marks the pending entry as 'reversed'.
+   */
+  async reversePendingReservation(payoutId: string, referenceType: string): Promise<void> {
+    try {
+      await this.prisma.journalEntry.updateMany({
+        where: {
+          referenceId: payoutId,
+          referenceType,
+          status: 'pending',
+        },
+        data: { status: 'reversed' },
+      });
+      this.logger.log(`Reversed pending reservation for payout ${payoutId} (${referenceType})`);
+    } catch (err) {
+      this.logger.error(`Failed to reverse pending reservation for payout ${payoutId}: ${err.message}`);
+    }
+  }
+
+  /**
+   * Promote a pending journal entry to 'posted' (called by webhook handler on successful confirmation).
+   */
+  async promotePendingToPosted(payoutId: string, referenceType: string, providerReference?: string): Promise<void> {
+    const result = await this.prisma.journalEntry.updateMany({
+      where: {
+        referenceId: payoutId,
+        referenceType,
+        status: 'pending',
+      },
+      data: {
+        status: 'posted',
+        providerReference: providerReference || undefined,
+      },
+    });
+    this.logger.log(`Promoted ${result.count} pending entries to posted for payout ${payoutId} (${referenceType})`);
+  }
+
   private async syncLegacyWalletBalance(agencyId: string) {
     try {
       const ledgerBal = await this.ledgerService.getAccountBalance(`AGENCY:${agencyId}:USD`);
@@ -568,7 +676,7 @@ export class PayoutsService {
       if (existing) {
         await this.prisma.wallet.update({
           where: { id: existing.id },
-          data: { balance: ledgerBal.balance },
+          data: { balance: ledgerBal.balance as any },
         });
       } else {
         await this.prisma.wallet.create({
@@ -576,7 +684,7 @@ export class PayoutsService {
             walletId: `WAL-AGY-${Math.floor(100000 + Math.random() * 900000)}`,
             userId: agencyId,
             accountType: 'agency',
-            balance: ledgerBal.balance,
+            balance: ledgerBal.balance as any,
             currency: 'USD',
             status: 'active',
           },
@@ -587,4 +695,3 @@ export class PayoutsService {
     }
   }
 }
-

@@ -15,7 +15,10 @@ export class UsersService {
         accountType: true,
         agncyId: true,
         emailVerified: true,
+        kybStatus: true,
         createdAt: true,
+        businessProfile: true,
+        bankDetails: true,
         workspacesOwned: true,
         memberships: {
           include: {

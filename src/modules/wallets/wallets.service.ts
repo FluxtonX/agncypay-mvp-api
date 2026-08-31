@@ -63,16 +63,19 @@ export class WalletsService {
     try {
       const code = `AGENCY:${wallet.userId}:USD`;
       const accountBal = await this.ledgerService.getAccountBalance(code);
-      if (accountBal.balance > 0 && accountBal.balance !== wallet.balance) {
-        return this.walletRepo.update(wallet.id, { balance: accountBal.balance });
+      if (accountBal.balance > 0 && accountBal.balance !== Number(wallet.balance)) {
+        return this.walletRepo.update(wallet.id, { balance: accountBal.balance as any });
       }
     } catch (_) {}
 
     return wallet;
   }
 
-  async getLedgerHistory(walletId: string) {
+  async getLedgerHistory(walletId: string, userId?: string) {
     const wallet = await this.getWalletByWalletId(walletId);
+    if (userId && wallet.userId !== userId) {
+      throw new NotFoundException(`Wallet ID ${walletId} not found`);
+    }
     const ledger = await this.walletRepo.getLedgerEntries(wallet.id);
     return { wallet, ledger };
   }

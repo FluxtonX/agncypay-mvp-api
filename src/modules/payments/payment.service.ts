@@ -40,7 +40,7 @@ export class PaymentService {
       const invoice = await this.prisma.invoice.findUnique({ where: { id: data.invoiceId } });
       if (invoice) {
         targetAgencyId = invoice.agencyId;
-        if (!targetAmount) targetAmount = invoice.amount;
+        if (!targetAmount) targetAmount = Number(invoice.amount);
         // Mark invoice as processing
         await this.prisma.invoice.update({
           where: { id: data.invoiceId },
@@ -145,7 +145,7 @@ export class PaymentService {
     await this.ledgerService.postJournalEntry({
       debitAccountCode: `CLEARING:CYBRID_DEPOSIT:USD`,
       creditAccountCode: `AGENCY:${payment.agencyId}:USD`,
-      amount: payment.amount,
+      amount: Number(payment.amount),
       currency: payment.currency,
       referenceType: 'BRAND_PAYMENT_FUNDED',
       referenceId: payment.id,
@@ -153,11 +153,11 @@ export class PaymentService {
       description: `Inbound funding for Payment ${payment.paymentNumber} from Brand`,
     });
 
-    // Update invoice if linked
+    // Update invoice if linked — mark as funded (not disbursed, as payouts haven't happened yet)
     if (payment.invoiceId) {
       await this.prisma.invoice.update({
         where: { id: payment.invoiceId },
-        data: { status: 'paid', payoutStatus: 'disbursed' },
+        data: { status: 'paid' },
       });
     }
 
@@ -186,10 +186,11 @@ export class PaymentService {
       this.logger.warn(`Could not sync wallet for agency ${payment.agencyId}: ${err.message}`);
     }
 
-    // Transition to COMPLETED
-    const completedPayment = await this.paymentStateService.transition(paymentId, 'COMPLETED');
+    // NOTE: Payment stays in FUNDED state.
+    // It transitions to COMPLETED only when the webhook handler confirms
+    // the Cybrid transfer has fully settled.
 
-    return completedPayment;
+    return await this.prisma.payment.findUnique({ where: { id: paymentId } });
   }
 
   async getPaymentById(paymentId: string, requestingUserId: string) {

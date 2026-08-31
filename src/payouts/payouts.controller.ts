@@ -1,5 +1,5 @@
-import { Controller, Get, Post, Body, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { Controller, Get, Post, Body, Headers, UseGuards } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
 import { PayoutsService } from './payouts.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators';
@@ -12,6 +12,7 @@ export class PayoutsController {
   constructor(private readonly payoutsService: PayoutsService) {}
 
   @ApiOperation({ summary: 'Request Domestic Talent Payout via Cybrid transfer' })
+  @ApiHeader({ name: 'Idempotency-Key', required: false, description: 'Unique idempotency key' })
   @Post('talent/domestic')
   async requestDomesticTalentPayout(
     @CurrentUser('id') agencyId: string,
@@ -20,20 +21,24 @@ export class PayoutsController {
     @Body('currency') currency?: string,
     @Body('paymentId') paymentId?: string,
     @Body('idempotencyKey') idempotencyKey?: string,
+    @Headers('idempotency-key') headerIdempotencyKey?: string,
+    @Headers('x-idempotency-key') headerXIdempotencyKey?: string,
     @Body('metadata') metadata?: Record<string, any>,
   ) {
+    const finalIdempotencyKey = headerIdempotencyKey || headerXIdempotencyKey || idempotencyKey;
     return this.payoutsService.requestDomesticTalentPayout({
       agencyId,
       talentId,
       amount,
       currency,
       paymentId,
-      idempotencyKey,
+      idempotencyKey: finalIdempotencyKey,
       metadata,
     });
   }
 
   @ApiOperation({ summary: 'Request International Talent Payout via USD -> USDC FX Trade and Remittance' })
+  @ApiHeader({ name: 'Idempotency-Key', required: false, description: 'Unique idempotency key' })
   @Post('talent/international')
   async requestInternationalTalentPayout(
     @CurrentUser('id') agencyId: string,
@@ -42,15 +47,18 @@ export class PayoutsController {
     @Body('destinationCurrency') destinationCurrency?: string,
     @Body('paymentId') paymentId?: string,
     @Body('idempotencyKey') idempotencyKey?: string,
+    @Headers('idempotency-key') headerIdempotencyKey?: string,
+    @Headers('x-idempotency-key') headerXIdempotencyKey?: string,
     @Body('metadata') metadata?: Record<string, any>,
   ) {
+    const finalIdempotencyKey = headerIdempotencyKey || headerXIdempotencyKey || idempotencyKey;
     return this.payoutsService.requestInternationalTalentPayout({
       agencyId,
       talentId,
       amount,
       destinationCurrency,
       paymentId,
-      idempotencyKey,
+      idempotencyKey: finalIdempotencyKey,
       metadata,
     });
   }

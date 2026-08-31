@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { Wallet, WalletLedger, Prisma, LedgerType } from '@prisma/client';
 import { IBaseRepository } from '../../../core/base/base.repository.interface';
+import { toDecimal, addDecimals, subDecimals, toNumber } from '../../../common/utils/decimal.util';
 
 @Injectable()
 export class WalletRepository implements IBaseRepository<Wallet> {
@@ -53,7 +54,7 @@ export class WalletRepository implements IBaseRepository<Wallet> {
   async addLedgerEntry(params: {
     walletId: string;
     type: LedgerType;
-    amount: number;
+    amount: number | Prisma.Decimal;
     referenceType: string;
     referenceId?: string;
     description?: string;
@@ -62,8 +63,10 @@ export class WalletRepository implements IBaseRepository<Wallet> {
       const wallet = await tx.wallet.findUnique({ where: { id: params.walletId } });
       if (!wallet) throw new Error(`Wallet ${params.walletId} not found`);
 
-      const delta = params.type === 'credit' ? params.amount : -params.amount;
-      const newBalance = wallet.balance + delta;
+      const newBalance =
+        params.type === 'credit'
+          ? addDecimals(wallet.balance, params.amount)
+          : subDecimals(wallet.balance, params.amount);
 
       const updatedWallet = await tx.wallet.update({
         where: { id: wallet.id },
@@ -74,7 +77,7 @@ export class WalletRepository implements IBaseRepository<Wallet> {
         data: {
           walletId: wallet.id,
           type: params.type,
-          amount: params.amount,
+          amount: toDecimal(params.amount),
           balanceAfter: newBalance,
           referenceType: params.referenceType,
           referenceId: params.referenceId,

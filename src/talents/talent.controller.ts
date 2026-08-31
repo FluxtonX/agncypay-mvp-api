@@ -63,6 +63,33 @@ export class TalentController {
     return this.talentService.getTalentById(id, agencyId);
   }
 
+  @ApiOperation({ summary: 'Get payout history for a specific Talent' })
+  @Get(':id/payouts')
+  async getTalentPayouts(
+    @Param('id') id: string,
+    @CurrentUser('id') agencyId: string,
+  ) {
+    return this.talentService.getTalentPayouts(id, agencyId);
+  }
+
+  @ApiOperation({ summary: 'Get total earnings summary for a specific Talent' })
+  @Get(':id/earnings')
+  async getTalentEarnings(
+    @Param('id') id: string,
+    @CurrentUser('id') agencyId: string,
+  ) {
+    return this.talentService.getTalentEarnings(id, agencyId);
+  }
+
+  @ApiOperation({ summary: 'Get banking and counterparty information for a Talent' })
+  @Get(':id/banking')
+  async getTalentBanking(
+    @Param('id') id: string,
+    @CurrentUser('id') agencyId: string,
+  ) {
+    return this.talentService.getTalentBanking(id, agencyId);
+  }
+
   @ApiOperation({ summary: 'Update Talent profile' })
   @Put(':id')
   async updateTalent(

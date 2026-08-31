@@ -4,35 +4,46 @@ import { AuditLogsService } from '../audit-logs/audit-logs.service';
 
 export type PayoutStatus =
   | 'CREATED'
+  | 'RESERVED'
   | 'VALIDATING'
   | 'QUOTE_PENDING'
   | 'TRANSFER_PENDING'
   | 'TRADE_PENDING'
   | 'TRADE_COMPLETED'
   | 'REMITTANCE_PENDING'
+  | 'REMITTANCE_PROCESSING'
+  | 'REMITTANCE_COMPLETED'
   | 'EXECUTION_PENDING'
   | 'COMPLETED'
   | 'FAILED'
-  | 'RETURNED';
+  | 'RETURNED'
+  | 'CANCELLED';
+
+/** Terminal states — once entered, no forward webhook can override */
+export const TERMINAL_PAYOUT_STATES: PayoutStatus[] = ['COMPLETED', 'FAILED', 'RETURNED', 'CANCELLED'];
 
 @Injectable()
 export class PayoutStateService {
   private readonly logger = new Logger(PayoutStateService.name);
 
   private readonly validTransitions: Record<PayoutStatus, PayoutStatus[]> = {
-    CREATED: ['VALIDATING', 'FAILED'],
-    VALIDATING: ['QUOTE_PENDING', 'TRANSFER_PENDING', 'TRADE_PENDING', 'FAILED'],
-    QUOTE_PENDING: ['TRANSFER_PENDING', 'TRADE_PENDING', 'TRADE_COMPLETED', 'FAILED'],
+    CREATED: ['RESERVED', 'VALIDATING', 'FAILED', 'CANCELLED'],
+    RESERVED: ['VALIDATING', 'FAILED', 'CANCELLED'],
+    VALIDATING: ['QUOTE_PENDING', 'TRANSFER_PENDING', 'TRADE_PENDING', 'FAILED', 'CANCELLED'],
+    QUOTE_PENDING: ['TRANSFER_PENDING', 'TRADE_PENDING', 'FAILED', 'CANCELLED'],
     // Domestic
     TRANSFER_PENDING: ['COMPLETED', 'FAILED', 'RETURNED'],
     // International
     TRADE_PENDING: ['TRADE_COMPLETED', 'FAILED'],
-    TRADE_COMPLETED: ['REMITTANCE_PENDING', 'COMPLETED', 'FAILED'],
-    REMITTANCE_PENDING: ['EXECUTION_PENDING', 'FAILED'],
-    EXECUTION_PENDING: ['COMPLETED', 'FAILED', 'RETURNED'],
+    TRADE_COMPLETED: ['REMITTANCE_PENDING', 'FAILED'],
+    REMITTANCE_PENDING: ['EXECUTION_PENDING', 'REMITTANCE_PROCESSING', 'FAILED'],
+    REMITTANCE_PROCESSING: ['REMITTANCE_COMPLETED', 'FAILED'],
+    REMITTANCE_COMPLETED: ['COMPLETED', 'FAILED'],
+    EXECUTION_PENDING: ['REMITTANCE_PROCESSING', 'COMPLETED', 'FAILED', 'RETURNED'],
     COMPLETED: ['RETURNED'],
     FAILED: [],
     RETURNED: [],
+    CANCELLED: [],
   };
 
   constructor(
@@ -79,7 +90,7 @@ export class PayoutStateService {
 
     if (targetState === 'COMPLETED') {
       updateData.completedAt = new Date();
-    } else if (targetState === 'FAILED' || targetState === 'RETURNED') {
+    } else if (targetState === 'FAILED' || targetState === 'RETURNED' || targetState === 'CANCELLED') {
       updateData.failedAt = new Date();
       updateData.failureReason = details?.reason;
       updateData.failureStage = details?.stage || currentState;

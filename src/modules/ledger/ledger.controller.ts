@@ -53,5 +53,32 @@ export class LedgerController {
     }
     return this.ledgerService.getJournalHistory(targetCode, limit ? Number(limit) : 50);
   }
+
+  @ApiOperation({ summary: 'Get time-range statement for ledger account' })
+  @Get('statement')
+  async getStatement(
+    @CurrentUser('id') userId: string,
+    @Query('accountCode') accountCode?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('limit') limit?: number,
+  ) {
+    const targetCode = accountCode || `AGENCY:${userId}:USD`;
+    if (targetCode.startsWith('AGENCY:') && !targetCode.includes(userId)) {
+      throw new ForbiddenException('Access denied to this ledger account statement');
+    }
+
+    return this.ledgerService.getStatement(targetCode, {
+      startDate: startDate ? new Date(startDate) : undefined,
+      endDate: endDate ? new Date(endDate) : undefined,
+      limit: limit ? Number(limit) : 100,
+    });
+  }
+
+  @ApiOperation({ summary: 'Get global double-entry trial balance (Admin/Reconciliation)' })
+  @Get('trial-balance')
+  async getTrialBalance() {
+    return this.ledgerService.getTrialBalance();
+  }
 }
 

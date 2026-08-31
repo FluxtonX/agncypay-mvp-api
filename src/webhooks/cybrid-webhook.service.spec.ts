@@ -39,6 +39,12 @@ describe('CybridWebhookService', () => {
       wallet: {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      journalEntry: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 'je_1' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        count: jest.fn().mockResolvedValue(1),
+      },
       cybridCustomer: {
         findFirst: jest.fn(),
         findUnique: jest.fn(),
@@ -121,7 +127,7 @@ describe('CybridWebhookService', () => {
     );
     expect(prisma.invoice.update).toHaveBeenCalledWith({
       where: { id: 'inv_101' },
-      data: { status: 'paid', payoutStatus: 'disbursed' },
+      data: { status: 'paid' },
     });
   });
 
@@ -148,14 +154,14 @@ describe('CybridWebhookService', () => {
 
     expect(result.success).toBe(true);
     expect(payoutStateService.transition).toHaveBeenCalledWith('payout_1', 'FAILED', expect.any(Object));
-    expect(ledgerService.postJournalEntry).toHaveBeenCalledWith(
-      expect.objectContaining({
-        debitAccountCode: 'CLEARING:CYBRID_OUTBOUND:USD',
-        creditAccountCode: 'AGENCY:agency_user_1:USD',
-        amount: 500,
-        referenceType: 'PAYOUT_REVERSAL',
-      }),
-    );
+    expect(prisma.journalEntry.updateMany).toHaveBeenCalledWith({
+      where: {
+        referenceId: 'payout_1',
+        referenceType: 'DOMESTIC_TALENT_PAYOUT',
+        status: 'pending',
+      },
+      data: { status: 'reversed' },
+    });
   });
 
   it('should reject invalid webhook signature', async () => {

@@ -54,43 +54,43 @@ export class TalentService {
     const customer = await this.customerService.createOrGetCustomer(data.agencyId);
 
     // 3. Create Cybrid Counterparty (Customer-Owned!)
+    if (!this.config.isConfigured) {
+      throw new BadRequestException('Cybrid configuration credentials missing in environment.');
+    }
+
     let counterpartyGuid: string;
     try {
-      if (this.config.isConfigured) {
-        const nameParts = data.fullName.trim().split(' ');
-        const firstName = nameParts[0];
-        const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'Talent';
+      const nameParts = data.fullName.trim().split(' ');
+      const firstName = nameParts[0];
+      const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'Talent';
 
-        const country = data.country || 'US';
-        const postalCode = country === 'BR' ? '01310-100' : (country === 'CA' ? 'M5V 2T6' : '94105');
-        const city = country === 'BR' ? 'Sao Paulo' : (country === 'CA' ? 'Toronto' : 'San Francisco');
-        const subdivision = country === 'BR' ? 'SP' : (country === 'CA' ? 'ON' : 'CA');
+      const country = data.country || 'US';
+      const postalCode = country === 'BR' ? '01310-100' : (country === 'CA' ? 'M5V 2T6' : '94105');
+      const city = country === 'BR' ? 'Sao Paulo' : (country === 'CA' ? 'Toronto' : 'San Francisco');
+      const subdivision = country === 'BR' ? 'SP' : (country === 'CA' ? 'ON' : 'CA');
 
-        const cpResp = await this.cybridProvider.createCounterparty({
-          customerGuid: customer.cybridCustomerGuid,
-          type: 'individual',
-          name: {
-            first: firstName,
-            last: lastName,
-            full: data.fullName,
-          },
-          address: {
-            street: '123 Talent Way',
-            city,
-            subdivision,
-            postalCode,
-            countryCode: country,
-          },
-          email: data.email,
-          phone: data.phone,
-        });
-        counterpartyGuid = cpResp.guid;
-      } else {
-        counterpartyGuid = `cp_cyb_${Date.now()}`;
-      }
+      const cpResp = await this.cybridProvider.createCounterparty({
+        customerGuid: customer.cybridCustomerGuid,
+        type: 'individual',
+        name: {
+          first: firstName,
+          last: lastName,
+          full: data.fullName,
+        },
+        address: {
+          street: '123 Talent Way',
+          city,
+          subdivision,
+          postalCode,
+          countryCode: country,
+        },
+        email: data.email,
+        phone: data.phone,
+      });
+      counterpartyGuid = cpResp.guid;
     } catch (err) {
-      this.logger.warn(`Cybrid counterparty creation failed, using sandbox fallback: ${err.message}`);
-      counterpartyGuid = `cp_cyb_${Date.now()}`;
+      this.logger.error(`Cybrid counterparty creation failed: ${err.message}`);
+      throw new BadRequestException(`Failed to create Cybrid counterparty for talent: ${err.message}`);
     }
 
     // 4. Save CybridCounterparty in database linked to Talent and Agency's Cybrid Customer
@@ -220,6 +220,74 @@ export class TalentService {
     });
 
     return { success: true };
+  }
+
+  async getTalentPayouts(talentId: string, agencyId: string) {
+    await this.getTalentById(talentId, agencyId);
+
+    return this.prisma.paymentPayout.findMany({
+      where: { talentId, agencyId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async getTalentEarnings(talentId: string, agencyId: string) {
+    await this.getTalentById(talentId, agencyId);
+
+    const payouts = await this.prisma.paymentPayout.findMany({
+      where: { talentId, agencyId },
+    });
+
+    let totalEarned = 0;
+    let pendingPayouts = 0;
+    let completedCount = 0;
+    let pendingCount = 0;
+
+    for (const p of payouts) {
+      const amt = Number(p.amount) || 0;
+      if (p.status === 'COMPLETED') {
+        totalEarned += amt;
+        completedCount++;
+      } else if (!['FAILED', 'RETURNED', 'CANCELLED'].includes(p.status)) {
+        pendingPayouts += amt;
+        pendingCount++;
+      }
+    }
+
+    return {
+      talentId,
+      totalEarned,
+      pendingPayouts,
+      completedCount,
+      pendingCount,
+      totalPayoutsCount: payouts.length,
+      currency: 'USD',
+    };
+  }
+
+  async getTalentBanking(talentId: string, agencyId: string) {
+    const talent = await this.getTalentById(talentId, agencyId);
+
+    const counterparties = talent.counterparties.map((cp) => ({
+      guid: cp.cybridCounterpartyGuid,
+      name: cp.name,
+      type: cp.counterpartyType,
+      status: cp.status,
+      bankAccounts: cp.externalBankAccounts.map((ba) => ({
+        id: ba.id,
+        bankName: ba.bankName,
+        mask: ba.mask,
+        asset: ba.asset,
+        status: ba.status,
+        guid: ba.cybridExternalBankGuid,
+      })),
+    }));
+
+    return {
+      talentId: talent.id,
+      fullName: talent.fullName,
+      counterparties,
+    };
   }
 }
 
