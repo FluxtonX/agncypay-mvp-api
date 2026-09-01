@@ -204,16 +204,25 @@ export interface QuoteResponse {
   createdAt: string;
 }
 
-// ─── Transfers ──────────────────────────────────────────────────
+export interface TransferParticipant {
+  type: 'customer' | 'bank' | 'counterparty';
+  guid: string;
+  amount: number;
+}
 
 export interface CreateTransferParams {
   quoteGuid: string;
   transferType: 'funding' | 'crypto' | 'instant_funding' | 'inter_account' | 'lightning' | 'book';
   paymentRail?: 'ach' | 'eft' | 'wire' | 'rtp' | 'etransfer';
+  fiatAccountGuid?: string;
   sourceAccountGuid?: string;
   destinationAccountGuid?: string;
   externalBankAccountGuid?: string;
   beneficiaryMemo?: string;
+  sourceParticipants?: TransferParticipant[];
+  destinationParticipants?: TransferParticipant[];
+  expectedState?: 'pending' | 'in_progress' | 'completed';
+  expectedBehaviours?: string[];
   labels?: string[];
 }
 
@@ -324,6 +333,8 @@ export interface IFinancialProvider {
 
   createCustomer(params: CreateBusinessCustomerParams): Promise<CustomerResponse>;
   getCustomer(guid: string): Promise<CustomerResponse>;
+  listCustomers(params?: { page?: number; perPage?: number; type?: string; guid?: string; label?: string; includePii?: boolean }): Promise<CustomerResponse[]>;
+  updateCustomer(guid: string, params: { state?: string }): Promise<CustomerResponse>;
 
   createIdentityVerification(params: CreateIdentityVerificationParams): Promise<IdentityVerificationResponse>;
   getIdentityVerification(guid: string): Promise<IdentityVerificationResponse>;
@@ -348,6 +359,7 @@ export interface IFinancialProvider {
 
   createTransfer(params: CreateTransferParams): Promise<TransferResponse>;
   getTransfer(guid: string): Promise<TransferResponse>;
+  cancelTransfer(guid: string): Promise<TransferResponse>;
 
   createTrade(params: CreateTradeParams): Promise<TradeResponse>;
   getTrade(guid: string): Promise<TradeResponse>;
