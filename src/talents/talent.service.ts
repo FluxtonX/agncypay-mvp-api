@@ -289,5 +289,89 @@ export class TalentService {
       counterparties,
     };
   }
+
+  /**
+   * Import or bulk-sync talent roster exported from Agency CRM / CSV
+   */
+  async importTalentRoster(
+    agencyId: string,
+    roster: Array<{
+      externalTalentId?: string;
+      fullName: string;
+      email?: string;
+      phone?: string;
+      country?: string;
+      isInternational?: boolean;
+      metadata?: Record<string, any>;
+    }>,
+  ) {
+    const results = {
+      totalReceived: roster.length,
+      importedCount: 0,
+      updatedCount: 0,
+      talents: [] as any[],
+    };
+
+    for (const item of roster) {
+      if (!item.fullName) continue;
+
+      const existing = await this.prisma.talent.findFirst({
+        where: {
+          agencyId,
+          deletedAt: null,
+          OR: [
+            ...(item.email ? [{ email: item.email }] : []),
+            ...(item.phone ? [{ phone: item.phone }] : []),
+          ],
+        },
+      });
+
+      const mergedMetadata = {
+        ...(existing?.metadata as Record<string, any> || {}),
+        ...(item.metadata || {}),
+        ...(item.externalTalentId ? { externalTalentId: item.externalTalentId } : {}),
+      };
+
+      if (existing) {
+        const updated = await this.prisma.talent.update({
+          where: { id: existing.id },
+          data: {
+            fullName: item.fullName || existing.fullName,
+            email: item.email || existing.email,
+            phone: item.phone || existing.phone,
+            country: item.country || existing.country,
+            metadata: mergedMetadata,
+          },
+        });
+        results.updatedCount++;
+        results.talents.push(updated);
+      } else {
+        const created = await this.createTalent({
+          agencyId,
+          fullName: item.fullName,
+          email: item.email,
+          phone: item.phone,
+          country: item.country,
+          isInternational: item.isInternational,
+          metadata: mergedMetadata,
+        });
+        results.importedCount++;
+        results.talents.push(created.talent);
+      }
+    }
+
+    await this.auditLogsService.log({
+      userId: agencyId,
+      action: 'TALENT_ROSTER_IMPORTED',
+      entityType: 'TalentRoster',
+      details: {
+        totalReceived: results.totalReceived,
+        importedCount: results.importedCount,
+        updatedCount: results.updatedCount,
+      },
+    });
+
+    return results;
+  }
 }
 

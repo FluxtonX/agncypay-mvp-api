@@ -32,6 +32,15 @@ export class VerificationController {
     return this.verificationService.exchangePlaidPublicToken(userId, publicToken);
   }
 
+  @ApiOperation({ summary: 'Link Plaid sandbox test bank account directly' })
+  @Post('plaid/sandbox-link')
+  async linkPlaidSandboxAccount(
+    @CurrentUser('id') userId: string,
+    @Body('institutionId') institutionId?: string,
+  ) {
+    return this.verificationService.linkPlaidSandboxAccount(userId, institutionId);
+  }
+
   @ApiOperation({ summary: 'Create Plaid processor token for ACH payment gateways' })
   @Post('plaid/processor-token')
   async createPlaidProcessorToken(

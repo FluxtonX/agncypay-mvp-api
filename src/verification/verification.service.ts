@@ -95,6 +95,29 @@ export class VerificationService {
       },
     });
 
+    if (primaryAccount) {
+      const extAccountId = primaryAccount.accountId || `plaid_${bankDetails.id}`;
+      await this.prisma.agencyExternalAccount.upsert({
+        where: { providerExternalAccountId: extAccountId },
+        update: {
+          accountName: primaryAccount.accountHolderName || primaryAccount.bankName,
+          bankName: primaryAccount.bankName,
+          accountNumberMask: primaryAccount.accountNumberMask || '6789',
+          routingNumber: primaryAccount.routingNumber || '111000025',
+          isPrimary: true,
+        },
+        create: {
+          agencyId: userId,
+          accountName: primaryAccount.accountHolderName || primaryAccount.bankName,
+          bankName: primaryAccount.bankName,
+          accountNumberMask: primaryAccount.accountNumberMask || '6789',
+          routingNumber: primaryAccount.routingNumber || '111000025',
+          providerExternalAccountId: extAccountId,
+          isPrimary: true,
+        },
+      });
+    }
+
     await this.auditLogsService.log({
       userId,
       action: 'BANK_VERIFIED_PLAID',
@@ -104,6 +127,11 @@ export class VerificationService {
     });
 
     return { success: true, bankDetails, accounts: result.accounts };
+  }
+
+  async linkPlaidSandboxAccount(userId: string, institutionId = 'ins_109508') {
+    const publicToken = await this.plaidProvider.createSandboxPublicToken(institutionId);
+    return this.exchangePlaidPublicToken(userId, publicToken);
   }
 
   async updateBusinessProfile(userId: string, data: any) {

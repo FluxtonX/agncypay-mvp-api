@@ -110,4 +110,32 @@ export class PayoutsController {
   async getPayoutHistory(@CurrentUser('id') agencyId: string) {
     return this.payoutsService.getPayoutHistory(agencyId);
   }
+
+  @ApiOperation({ summary: 'Process recurring batch of approved payable instructions from Agency CRM' })
+  @Post('batch-payables')
+  async processBatchPayables(
+    @CurrentUser('id') agencyId: string,
+    @Body('batchId') batchId?: string,
+    @Body('payables') payables?: Array<{
+      externalTalentId?: string;
+      talentId?: string;
+      talentName?: string;
+      email?: string;
+      phone?: string;
+      invoiceId?: string;
+      jobId?: string;
+      grossAmount?: number;
+      commission?: number;
+      expenses?: number;
+      netPayable: number;
+      currency?: string;
+      metadata?: Record<string, any>;
+    }>,
+  ) {
+    return this.payoutsService.processBatchPayables({
+      agencyId,
+      batchId,
+      payables: payables || [],
+    });
+  }
 }

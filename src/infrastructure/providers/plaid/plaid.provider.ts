@@ -63,6 +63,20 @@ export class PlaidProvider implements IBankVerificationProvider {
     }
   }
 
+  async createSandboxPublicToken(institutionId = 'ins_109508'): Promise<string> {
+    const client = this.ensureClient();
+    try {
+      const response = await client.sandboxPublicTokenCreate({
+        institution_id: institutionId,
+        initial_products: [Products.Auth],
+      });
+      return response.data.public_token;
+    } catch (err: any) {
+      this.logger.error(`Failed to create Plaid sandbox public token: ${err.message}`);
+      throw new BadGatewayException(`Plaid sandbox token creation failed: ${err.message}`);
+    }
+  }
+
   async exchangePublicToken(request: ExchangePublicTokenRequest): Promise<{ accessToken: string; itemId: string; accounts: VerifiedBankAccount[] }> {
     const client = this.ensureClient();
 

@@ -487,13 +487,27 @@ export class PayoutsService {
 
     const extAccount = await this.prisma.agencyExternalAccount.findFirst({
       where: {
-        id: data.destinationExternalAccountId,
         agencyId: data.agencyId,
+        OR: [
+          { id: data.destinationExternalAccountId },
+          { providerExternalAccountId: data.destinationExternalAccountId },
+        ],
       },
     });
 
     if (!extAccount) {
-      throw new NotFoundException('Destination external bank account not found');
+      throw new NotFoundException('Destination external bank account not found or does not belong to this user');
+    }
+
+    const cybridEba = await this.prisma.cybridExternalBankAccount?.findFirst({
+      where: {
+        agencyUserId: data.agencyId,
+        cybridExternalBankGuid: extAccount.providerExternalAccountId,
+      },
+    });
+
+    if (cybridEba && (cybridEba.status === 'failed' || cybridEba.status === 'deleted')) {
+      throw new BadRequestException(`Selected bank account is not eligible for payout (status: ${cybridEba.status})`);
     }
 
     const agencyAccountCode = `AGENCY:${data.agencyId}:USD`;
@@ -693,5 +707,147 @@ export class PayoutsService {
     } catch (err) {
       this.logger.warn(`Could not sync wallet balance for agency ${agencyId}: ${err.message}`);
     }
+  }
+
+  /**
+   * Process a recurring batch of approved payable instructions from Agency CRM / CSV export.
+   * Treats netPayable as the authoritative execution value without recalculating commissions.
+   */
+  async processBatchPayables(data: {
+    agencyId: string;
+    batchId?: string;
+    payables: Array<{
+      externalTalentId?: string;
+      talentId?: string;
+      talentName?: string;
+      email?: string;
+      phone?: string;
+      invoiceId?: string;
+      jobId?: string;
+      grossAmount?: number;
+      commission?: number;
+      expenses?: number;
+      netPayable: number;
+      currency?: string;
+      metadata?: Record<string, any>;
+    }>;
+  }) {
+    if (!data.payables || data.payables.length === 0) {
+      throw new BadRequestException('Payables batch must contain at least one instruction');
+    }
+
+    const batchId = data.batchId || `batch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const results = {
+      batchId,
+      totalInstructions: data.payables.length,
+      totalNetPayable: 0,
+      successfulCount: 0,
+      failedCount: 0,
+      payouts: [] as any[],
+      errors: [] as Array<{ index: number; externalTalentId?: string; error: string }>,
+    };
+
+    let totalBatchAmount = 0;
+    for (const item of data.payables) {
+      if (item.netPayable <= 0) {
+        throw new BadRequestException(
+          `Net payable amount for talent ${item.talentName || item.externalTalentId || 'item'} must be > 0`,
+        );
+      }
+      totalBatchAmount += item.netPayable;
+    }
+    results.totalNetPayable = totalBatchAmount;
+
+    const agencyAccountCode = `AGENCY:${data.agencyId}:USD`;
+    const ledgerBal = await this.ledgerService.getAccountBalance(agencyAccountCode);
+    const availableDec = toDecimal(ledgerBal.balance);
+    const requiredDec = toDecimal(totalBatchAmount);
+
+    if (availableDec.lessThan(requiredDec)) {
+      throw new BadRequestException(
+        `Insufficient available Agency balance ($${availableDec.toFixed(2)}) to execute batch total ($${requiredDec.toFixed(2)})`,
+      );
+    }
+
+    for (let i = 0; i < data.payables.length; i++) {
+      const item = data.payables[i];
+
+      try {
+        let talent = null;
+        if (item.talentId) {
+          talent = await this.prisma.talent.findFirst({
+            where: { id: item.talentId, agencyId: data.agencyId, deletedAt: null },
+          });
+        }
+
+        if (!talent && item.email) {
+          talent = await this.prisma.talent.findFirst({
+            where: { agencyId: data.agencyId, email: item.email, deletedAt: null },
+          });
+        }
+
+        if (!talent && item.externalTalentId) {
+          const allAgencyTalents = await this.prisma.talent.findMany({
+            where: { agencyId: data.agencyId, deletedAt: null },
+          });
+          talent = allAgencyTalents.find(
+            (t) => (t.metadata as Record<string, any>)?.externalTalentId === item.externalTalentId,
+          ) || null;
+        }
+
+        if (!talent) {
+          throw new NotFoundException(
+            `Talent not found by external ID ${item.externalTalentId || ''} or email ${item.email || ''}`,
+          );
+        }
+
+        const richMetadata = {
+          ...(item.metadata || {}),
+          batchId,
+          externalTalentId: item.externalTalentId,
+          externalJobId: item.jobId,
+          externalInvoiceId: item.invoiceId,
+          grossAmount: item.grossAmount,
+          agencyCommission: item.commission,
+          expensesDeductions: item.expenses,
+          netPayable: item.netPayable,
+          sourceSystem: 'CRM_BATCH_IMPORT',
+        };
+
+        const payoutResult = await this.requestDomesticTalentPayout({
+          agencyId: data.agencyId,
+          talentId: talent.id,
+          amount: item.netPayable,
+          currency: item.currency || 'USD',
+          paymentId: item.invoiceId,
+          metadata: richMetadata,
+        });
+
+        results.successfulCount++;
+        results.payouts.push(payoutResult);
+      } catch (err: any) {
+        results.failedCount++;
+        results.errors.push({
+          index: i,
+          externalTalentId: item.externalTalentId,
+          error: err.message,
+        });
+      }
+    }
+
+    await this.auditLogsService.log({
+      userId: data.agencyId,
+      action: 'BATCH_PAYABLES_EXECUTED',
+      entityType: 'PaymentPayoutBatch',
+      details: {
+        batchId,
+        totalInstructions: results.totalInstructions,
+        successfulCount: results.successfulCount,
+        failedCount: results.failedCount,
+        totalNetPayable: results.totalNetPayable,
+      },
+    });
+
+    return results;
   }
 }

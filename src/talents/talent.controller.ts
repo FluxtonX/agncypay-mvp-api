@@ -33,6 +33,23 @@ export class TalentController {
     });
   }
 
+  @ApiOperation({ summary: 'Bulk import or update talent roster from Agency CRM / CSV export' })
+  @Post('roster/import')
+  async importRoster(
+    @CurrentUser('id') agencyId: string,
+    @Body('roster') roster: Array<{
+      externalTalentId?: string;
+      fullName: string;
+      email?: string;
+      phone?: string;
+      country?: string;
+      isInternational?: boolean;
+      metadata?: Record<string, any>;
+    }>,
+  ) {
+    return this.talentService.importTalentRoster(agencyId, roster || []);
+  }
+
   @ApiOperation({ summary: 'Link an external bank account to a Talent for payouts' })
   @Post(':id/bank-account')
   async linkBankAccount(

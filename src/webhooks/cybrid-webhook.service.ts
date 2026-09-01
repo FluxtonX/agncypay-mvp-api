@@ -70,6 +70,8 @@ export class CybridWebhookService {
         await this.handleIdentityVerificationEvent(event);
       } else if (eventType.startsWith('customer.')) {
         await this.handleCustomerEvent(event);
+      } else if (eventType.startsWith('external_bank_account.')) {
+        await this.handleExternalBankAccountEvent(event);
       } else {
         this.logger.debug(`Unhandled event type ${eventType}`);
       }
@@ -510,6 +512,52 @@ export class CybridWebhookService {
         entityType: 'CybridCustomer',
         entityId: customer.id,
         details: { customerGuid, state, kybStatus },
+      });
+    }
+  }
+
+  private async handleExternalBankAccountEvent(event: any) {
+    const guid = event.object_guid || event.guid || event.external_bank_account_guid;
+    const state = event.state || (event.event_type?.endsWith('.completed') ? 'completed' : event.event_type?.endsWith('.failed') ? 'failed' : 'processing');
+    const failureCode = event.failure_code;
+
+    if (!guid) return;
+
+    this.logger.log(`Handling external bank account webhook [${guid}] -> state: ${state}`);
+
+    const existing = await this.prisma.cybridExternalBankAccount.findUnique({
+      where: { cybridExternalBankGuid: guid },
+    });
+
+    if (existing) {
+      await this.prisma.cybridExternalBankAccount.update({
+        where: { id: existing.id },
+        data: {
+          status: state,
+          failureCode: failureCode || existing.failureCode,
+        },
+      });
+
+      if (existing.agencyUserId) {
+        if (state === 'completed') {
+          await this.prisma.bankDetails.updateMany({
+            where: { userId: existing.agencyUserId },
+            data: { status: 'approved' },
+          });
+        } else if (state === 'failed') {
+          await this.prisma.bankDetails.updateMany({
+            where: { userId: existing.agencyUserId },
+            data: { status: 'rejected' },
+          });
+        }
+      }
+
+      await this.auditLogsService.log({
+        userId: existing.agencyUserId || 'SYSTEM',
+        action: `CYBRID_EBA_STATE_${state.toUpperCase()}`,
+        entityType: 'CybridExternalBankAccount',
+        entityId: existing.id,
+        details: { guid, state, failureCode },
       });
     }
   }

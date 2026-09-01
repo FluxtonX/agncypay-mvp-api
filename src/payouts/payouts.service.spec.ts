@@ -52,6 +52,9 @@ describe('PayoutsService', () => {
         findFirst: jest.fn(),
         updateMany: jest.fn(),
       },
+      cybridExternalBankAccount: {
+        findFirst: jest.fn().mockResolvedValue({ status: 'completed' }),
+      },
       paymentPayout: {
         create: jest.fn(),
         update: jest.fn(),
