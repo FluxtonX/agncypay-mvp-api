@@ -164,12 +164,18 @@ describe('CybridWebhookService', () => {
     });
   });
 
-  it('should reject invalid webhook signature', async () => {
+  it('should reject invalid webhook signature in production', async () => {
+    const origEnv = process.env.CYBRID_ENVIRONMENT;
+    process.env.CYBRID_ENVIRONMENT = 'production';
     cybridProvider.verifyWebhookSignature.mockReturnValue(false);
 
-    await expect(
-      service.processWebhookEvent({ id: 'evt_bad' }, 'bad_sig'),
-    ).rejects.toThrow('Invalid webhook signature');
+    try {
+      await expect(
+        service.processWebhookEvent({ id: 'evt_bad' }, 'bad_sig'),
+      ).rejects.toThrow('Invalid webhook signature');
+    } finally {
+      process.env.CYBRID_ENVIRONMENT = origEnv;
+    }
   });
 
   it('should deduplicate already processed webhook events', async () => {

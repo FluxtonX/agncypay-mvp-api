@@ -28,16 +28,16 @@ export class ExternalBankAccountService {
     routingNumber: string;
     accountHolderName?: string;
   }) {
-    const talent = await this.prisma.talent.findFirst({
-      where: { id: data.talentId, agencyId: data.agencyId, deletedAt: null },
-      include: { counterparties: true },
+    const talent = await this.prisma.user.findFirst({
+      where: { id: data.talentId, accountType: 'talent', deletedAt: null },
+      include: { talentCounterparties: true },
     });
 
     if (!talent) {
       throw new NotFoundException(`Talent ${data.talentId} not found`);
     }
 
-    const counterparty = talent.counterparties[0];
+    const counterparty = talent.talentCounterparties[0];
     if (!counterparty) {
       throw new BadRequestException(`Talent does not have a linked Cybrid Counterparty`);
     }
