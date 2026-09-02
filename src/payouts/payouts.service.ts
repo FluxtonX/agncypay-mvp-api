@@ -73,20 +73,20 @@ export class PayoutsService {
     }
 
     // 3. Resolve Talent & Counterparty & External Bank
-    const talent = await this.prisma.talent.findFirst({
-      where: { id: data.talentId, agencyId: data.agencyId, deletedAt: null },
+    const talent = await this.prisma.user.findFirst({
+      where: { id: data.talentId, accountType: 'talent', deletedAt: null },
       include: {
-        counterparties: {
+        talentCounterparties: {
           include: { externalBankAccounts: true },
         },
       },
     });
 
     if (!talent) {
-      throw new NotFoundException(`Talent ${data.talentId} not found for this Agency`);
+      throw new NotFoundException(`Talent ${data.talentId} not found`);
     }
 
-    const counterparty = talent.counterparties[0];
+    const counterparty = talent.talentCounterparties[0];
     if (!counterparty) {
       throw new BadRequestException(`Talent has no Cybrid Counterparty configured`);
     }
@@ -296,10 +296,10 @@ export class PayoutsService {
     }
 
     // 3. Resolve Talent & Counterparty
-    const talent = await this.prisma.talent.findFirst({
-      where: { id: data.talentId, agencyId: data.agencyId, deletedAt: null },
+    const talent = await this.prisma.user.findFirst({
+      where: { id: data.talentId, accountType: 'talent', deletedAt: null },
       include: {
-        counterparties: {
+        talentCounterparties: {
           include: { externalBankAccounts: true },
         },
       },
@@ -307,7 +307,7 @@ export class PayoutsService {
 
     if (!talent) throw new NotFoundException(`Talent ${data.talentId} not found`);
 
-    const counterparty = talent.counterparties[0];
+    const counterparty = talent.talentCounterparties[0];
     const externalBank = counterparty?.externalBankAccounts[0];
 
     // 4. Ensure Agency USDC Trading Account
@@ -775,23 +775,23 @@ export class PayoutsService {
       try {
         let talent = null;
         if (item.talentId) {
-          talent = await this.prisma.talent.findFirst({
-            where: { id: item.talentId, agencyId: data.agencyId, deletedAt: null },
+          talent = await this.prisma.user.findFirst({
+            where: { id: item.talentId, accountType: 'talent', deletedAt: null },
           });
         }
 
         if (!talent && item.email) {
-          talent = await this.prisma.talent.findFirst({
-            where: { agencyId: data.agencyId, email: item.email, deletedAt: null },
+          talent = await this.prisma.user.findFirst({
+            where: { email: item.email.trim().toLowerCase(), accountType: 'talent', deletedAt: null },
           });
         }
 
         if (!talent && item.externalTalentId) {
-          const allAgencyTalents = await this.prisma.talent.findMany({
-            where: { agencyId: data.agencyId, deletedAt: null },
+          const allAgencyTalents = await this.prisma.user.findMany({
+            where: { agencyId: data.agencyId, accountType: 'talent', deletedAt: null },
           });
           talent = allAgencyTalents.find(
-            (t) => (t.metadata as Record<string, any>)?.externalTalentId === item.externalTalentId,
+            (t) => t.agncyId === item.externalTalentId || t.id === item.externalTalentId,
           ) || null;
         }
 

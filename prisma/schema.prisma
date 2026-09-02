@@ -57,7 +57,11 @@ model User {
 
   // Cybrid relations
   cybridCustomer     CybridCustomer?
-  talentsManaged     Talent[]         @relation("AgencyTalents")
+  agencyId           String?
+  agency             User?            @relation("AgencyTalents", fields: [agencyId], references: [id], onDelete: SetNull)
+  talentsManaged     User[]           @relation("AgencyTalents")
+  talentPayouts      PaymentPayout[]  @relation("TalentPayouts")
+  talentCounterparties CybridCounterparty[] @relation("TalentCounterparties")
   paymentsAsBrand    Payment[]        @relation("PaymentBrand")
   paymentsAsAgency   Payment[]        @relation("PaymentAgency")
   paymentPayouts     PaymentPayout[]  @relation("PayoutAgency")
@@ -129,6 +133,7 @@ model RefreshToken {
 enum AccountType {
   brand
   agency
+  talent
 }
 
 // ─────────────────────────── WORKSPACE ───────────────────────────
@@ -708,7 +713,7 @@ model CybridCounterparty {
   name                     String
   counterpartyType         String    @default("individual")
   talentId                 String?
-  talent                   Talent?   @relation(fields: [talentId], references: [id])
+  talent                   User?     @relation("TalentCounterparties", fields: [talentId], references: [id])
   status                   String    @default("storing")
   createdAt                DateTime  @default(now())
   updatedAt                DateTime  @updatedAt
@@ -737,29 +742,6 @@ model CybridExternalBankAccount {
   updatedAt                   DateTime  @updatedAt
 
   @@map("cybrid_external_bank_accounts")
-}
-
-// ─────────────────────────── TALENT ───────────────────────────
-
-model Talent {
-  id              String    @id @default(uuid())
-  agencyId        String
-  agency          User      @relation("AgencyTalents", fields: [agencyId], references: [id], onDelete: Cascade)
-  fullName        String
-  email           String?
-  phone           String?
-  country         String    @default("US")
-  isInternational Boolean   @default(false)
-  status          String    @default("active")
-  metadata        Json      @default("{}")
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deletedAt       DateTime?
-
-  counterparties  CybridCounterparty[]
-  paymentPayouts  PaymentPayout[]
-
-  @@map("talents")
 }
 
 // ─────────────────────────── PAYMENT (Brand → Agency) ───────────────────────────
@@ -810,7 +792,7 @@ model PaymentPayout {
   agencyId               String
   agency                 User      @relation("PayoutAgency", fields: [agencyId], references: [id])
   talentId               String?
-  talent                 Talent?   @relation(fields: [talentId], references: [id])
+  talent                 User?     @relation("TalentPayouts", fields: [talentId], references: [id])
   amount                 Decimal   @db.Decimal(18, 4)
   currency               String    @default("USD")
   payoutType             String    @default("domestic")   // domestic, international, agency_withdrawal

@@ -5,6 +5,7 @@ import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service
 import { ExternalBankAccountService } from '../modules/cybrid/external-bank-account.service';
 import { CybridConfigService } from '../infrastructure/providers/cybrid/cybrid-config.service';
 import type { IFinancialProvider } from '../core/interfaces/financial-provider.interface';
+import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class TalentService {
@@ -37,18 +38,34 @@ export class TalentService {
       throw new NotFoundException(`Agency ${data.agencyId} not found`);
     }
 
-    // 1. Create Talent in DB
-    const talent = await this.prisma.talent.create({
-      data: {
-        agencyId: data.agencyId,
-        fullName: data.fullName,
-        email: data.email,
-        phone: data.phone,
-        country: data.country || 'US',
-        isInternational: data.isInternational ?? (data.country ? data.country !== 'US' : false),
-        metadata: data.metadata || {},
-      },
-    });
+    // 1. Create or Link Talent User in DB (Unified Users Table)
+    const email = (data.email || `talent-${Date.now()}-${Math.floor(Math.random() * 1000)}@agncypay.internal`).trim().toLowerCase();
+    const existing = await this.prisma.user.findUnique({ where: { email } });
+    let talent: any;
+
+    if (existing) {
+      talent = await this.prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          agencyId: data.agencyId,
+          accountType: 'talent',
+          fullName: data.fullName,
+        },
+      });
+    } else {
+      const hashedPassword = await bcrypt.hash('AgncyPayTalent2026!', 10);
+      talent = await this.prisma.user.create({
+        data: {
+          agencyId: data.agencyId,
+          email,
+          password: hashedPassword,
+          fullName: data.fullName,
+          accountType: 'talent',
+          agncyId: `TAL-${Math.floor(100000 + Math.random() * 900000)}`,
+          emailVerified: true,
+        },
+      });
+    }
 
     // 2. Ensure Agency has a Cybrid Customer so counterparty is customer-owned
     const customer = await this.customerService.createOrGetCustomer(data.agencyId);
@@ -93,7 +110,7 @@ export class TalentService {
       throw new BadRequestException(`Failed to create Cybrid counterparty for talent: ${err.message}`);
     }
 
-    // 4. Save CybridCounterparty in database linked to Talent and Agency's Cybrid Customer
+    // 4. Save CybridCounterparty in database linked to Talent User and Agency's Cybrid Customer
     const counterparty = await this.prisma.cybridCounterparty.create({
       data: {
         cybridCustomerId: customer.id,
@@ -108,12 +125,12 @@ export class TalentService {
     await this.auditLogsService.log({
       userId: data.agencyId,
       action: 'TALENT_CREATED_WITH_COUNTERPARTY',
-      entityType: 'Talent',
+      entityType: 'User',
       entityId: talent.id,
       details: {
         talentName: talent.fullName,
         counterpartyGuid,
-        isInternational: talent.isInternational,
+        isInternational: data.isInternational || false,
       },
     });
 
@@ -146,10 +163,10 @@ export class TalentService {
   }
 
   async getTalents(agencyId: string) {
-    return this.prisma.talent.findMany({
-      where: { agencyId, deletedAt: null },
+    return this.prisma.user.findMany({
+      where: { agencyId, accountType: 'talent', deletedAt: null },
       include: {
-        counterparties: {
+        talentCounterparties: {
           include: { externalBankAccounts: true },
         },
       },
@@ -158,13 +175,13 @@ export class TalentService {
   }
 
   async getTalentById(talentId: string, agencyId: string) {
-    const talent = await this.prisma.talent.findFirst({
-      where: { id: talentId, agencyId, deletedAt: null },
+    const talent = await this.prisma.user.findFirst({
+      where: { id: talentId, agencyId, accountType: 'talent', deletedAt: null },
       include: {
-        counterparties: {
+        talentCounterparties: {
           include: { externalBankAccounts: true },
         },
-        paymentPayouts: {
+        talentPayouts: {
           orderBy: { createdAt: 'desc' },
           take: 10,
         },
@@ -181,22 +198,18 @@ export class TalentService {
   async updateTalent(talentId: string, agencyId: string, data: any) {
     await this.getTalentById(talentId, agencyId);
 
-    const updated = await this.prisma.talent.update({
+    const updated = await this.prisma.user.update({
       where: { id: talentId },
       data: {
         fullName: data.fullName,
         email: data.email,
-        phone: data.phone,
-        country: data.country,
-        isInternational: data.isInternational,
-        status: data.status,
       },
     });
 
     await this.auditLogsService.log({
       userId: agencyId,
       action: 'TALENT_UPDATED',
-      entityType: 'Talent',
+      entityType: 'User',
       entityId: talentId,
       details: data,
     });
@@ -207,7 +220,7 @@ export class TalentService {
   async deleteTalent(talentId: string, agencyId: string) {
     await this.getTalentById(talentId, agencyId);
 
-    const deleted = await this.prisma.talent.update({
+    await this.prisma.user.update({
       where: { id: talentId },
       data: { deletedAt: new Date() },
     });
@@ -215,7 +228,7 @@ export class TalentService {
     await this.auditLogsService.log({
       userId: agencyId,
       action: 'TALENT_DELETED',
-      entityType: 'Talent',
+      entityType: 'User',
       entityId: talentId,
     });
 
@@ -268,7 +281,7 @@ export class TalentService {
   async getTalentBanking(talentId: string, agencyId: string) {
     const talent = await this.getTalentById(talentId, agencyId);
 
-    const counterparties = talent.counterparties.map((cp) => ({
+    const counterparties = talent.talentCounterparties.map((cp) => ({
       guid: cp.cybridCounterpartyGuid,
       name: cp.name,
       type: cp.counterpartyType,
@@ -315,32 +328,21 @@ export class TalentService {
     for (const item of roster) {
       if (!item.fullName) continue;
 
-      const existing = await this.prisma.talent.findFirst({
-        where: {
-          agencyId,
-          deletedAt: null,
-          OR: [
-            ...(item.email ? [{ email: item.email }] : []),
-            ...(item.phone ? [{ phone: item.phone }] : []),
-          ],
-        },
-      });
-
-      const mergedMetadata = {
-        ...(existing?.metadata as Record<string, any> || {}),
-        ...(item.metadata || {}),
-        ...(item.externalTalentId ? { externalTalentId: item.externalTalentId } : {}),
-      };
+      const email = item.email ? item.email.trim().toLowerCase() : undefined;
+      const existing = email
+        ? await this.prisma.user.findFirst({
+            where: { agencyId, email, accountType: 'talent', deletedAt: null },
+          })
+        : await this.prisma.user.findFirst({
+            where: { agencyId, fullName: item.fullName, accountType: 'talent', deletedAt: null },
+          });
 
       if (existing) {
-        const updated = await this.prisma.talent.update({
+        const updated = await this.prisma.user.update({
           where: { id: existing.id },
           data: {
             fullName: item.fullName || existing.fullName,
-            email: item.email || existing.email,
-            phone: item.phone || existing.phone,
-            country: item.country || existing.country,
-            metadata: mergedMetadata,
+            email: email || existing.email,
           },
         });
         results.updatedCount++;
@@ -353,7 +355,7 @@ export class TalentService {
           phone: item.phone,
           country: item.country,
           isInternational: item.isInternational,
-          metadata: mergedMetadata,
+          metadata: item.metadata,
         });
         results.importedCount++;
         results.talents.push(created.talent);
@@ -363,7 +365,7 @@ export class TalentService {
     await this.auditLogsService.log({
       userId: agencyId,
       action: 'TALENT_ROSTER_IMPORTED',
-      entityType: 'TalentRoster',
+      entityType: 'User',
       details: {
         totalReceived: results.totalReceived,
         importedCount: results.importedCount,
@@ -374,4 +376,3 @@ export class TalentService {
     return results;
   }
 }
-

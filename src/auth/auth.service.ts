@@ -53,11 +53,11 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(dto.password, 12);
     const accountType = dto.accountType as AccountType;
-    const prefix = accountType === 'brand' ? 'BRND' : 'AGY';
+    const prefix = accountType === 'brand' ? 'BRND' : accountType === 'talent' ? 'TAL' : 'AGY';
     const agncyId = this.generateAgncyId(prefix);
-    const workspaceType = accountType as unknown as WorkspaceType;
+    const workspaceType = (accountType === 'talent' ? 'agency' : accountType) as unknown as WorkspaceType;
     const role = this.getDefaultWorkspaceRole(workspaceType);
-    const workspaceName = dto.workspaceName?.trim() || 'AgncyPay Workspace';
+    const workspaceName = dto.workspaceName?.trim() || (accountType === 'talent' ? `${dto.fullName}'s Talent Workspace` : 'AgncyPay Workspace');
 
     const user = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const createdUser = await tx.user.create({
@@ -98,7 +98,7 @@ export class AuthService {
       await tx.brandVerification.create({ data: { userId: createdUser.id } });
       await tx.bankDetails.create({ data: { userId: createdUser.id } });
 
-      const walletPrefix = accountType === 'brand' ? 'WAL-BRND' : 'WAL-AGY';
+      const walletPrefix = accountType === 'brand' ? 'WAL-BRND' : accountType === 'talent' ? 'WAL-TAL' : 'WAL-AGY';
       const walletId = `${walletPrefix}-${Math.floor(100000 + Math.random() * 900000)}`;
 
       await tx.wallet.create({
