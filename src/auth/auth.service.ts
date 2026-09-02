@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException, ConflictException, NotFoundException
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
+import * as crypto from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RegisterDto, LoginDto, ForgotPasswordDto, ResetPasswordDto } from './dto';
 import { AccountType, WorkspaceType, WorkspaceRole, Prisma } from '@prisma/client';
@@ -136,6 +137,7 @@ export class AuthService {
         fullName: user.fullName,
         accountType: user.accountType,
         agncyId: user.agncyId,
+        kybStatus: user.kybStatus,
       },
       ...tokens,
     };
@@ -169,6 +171,7 @@ export class AuthService {
         fullName: user.fullName,
         accountType: user.accountType,
         agncyId: user.agncyId,
+        kybStatus: user.kybStatus,
       },
       ...tokens,
     };
@@ -178,13 +181,14 @@ export class AuthService {
     const user = await this.userRepo.findByEmail(dto.email);
     if (!user) {
       // Don't reveal if user exists
-      return { success: true, message: 'If user exists, reset email has been sent.' };
+      return { success: true, message: 'If an account exists with this email, password reset instructions have been sent.' };
     }
 
-    const resetToken = `reset-${Math.random().toString(36).substring(2)}${Date.now()}`;
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const hashedResetToken = crypto.createHash('sha256').update(rawToken).digest('hex');
     const resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-    await this.userRepo.update(user.id, { resetToken, resetTokenExpires });
+    await this.userRepo.update(user.id, { resetToken: hashedResetToken, resetTokenExpires });
 
     await this.auditLogsService.log({
       userId: user.id,
@@ -195,14 +199,20 @@ export class AuthService {
 
     return {
       success: true,
-      message: 'Reset token generated successfully.',
-      resetToken, // Returned in API for frontend password reset form flow
+      message: 'If an account exists with this email, password reset instructions have been sent.',
     };
   }
 
   async resetPassword(dto: ResetPasswordDto) {
+    const hashedToken = crypto.createHash('sha256').update(dto.token).digest('hex');
     const user = await this.prisma.user.findFirst({
-      where: { resetToken: dto.token, deletedAt: null },
+      where: {
+        OR: [
+          { resetToken: hashedToken },
+          { resetToken: dto.token }, // Fallback for pre-existing legacy tokens
+        ],
+        deletedAt: null,
+      },
     });
 
     if (!user || !user.resetTokenExpires || user.resetTokenExpires < new Date()) {

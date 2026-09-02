@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException, Logger, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, BadGatewayException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { CybridConfigService } from '../../infrastructure/providers/cybrid/cybrid-config.service';
 import type { IFinancialProvider } from '../../core/interfaces/financial-provider.interface';
+import { KybStatus } from '@prisma/client';
 
 @Injectable()
 export class CybridCustomerService {
@@ -29,6 +30,10 @@ export class CybridCustomerService {
       return user.cybridCustomer;
     }
 
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
     const businessName = user.businessProfile?.legalName || user.fullName || 'Agency Business Entity';
     const email = user.email;
 
@@ -36,35 +41,29 @@ export class CybridCustomerService {
     let customerState = 'storing';
 
     try {
-      if (this.config.isConfigured) {
-        const response = await this.cybridProvider.createCustomer({
-          name: businessName,
-          type: 'business',
-          bankGuid: this.config.bankGuid,
-          email,
-        });
-        customerGuid = response.guid;
-        customerState = response.state;
+      const response = await this.cybridProvider.createCustomer({
+        name: businessName,
+        type: 'business',
+        bankGuid: this.config.bankGuid,
+        email,
+      });
+      customerGuid = response.guid;
+      customerState = response.state;
 
-        // If newly created customer is in 'storing' state, poll until ready
-        if (customerState === 'storing') {
-          for (let i = 0; i < 5; i++) {
-            await new Promise((r) => setTimeout(r, 1000));
-            try {
-              const check = await this.cybridProvider.getCustomer(customerGuid);
-              customerState = check.state;
-              if (customerState !== 'storing') break;
-            } catch (_) {}
-          }
+      // If newly created customer is in 'storing' state, poll until ready
+      if (customerState === 'storing') {
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          try {
+            const check = await this.cybridProvider.getCustomer(customerGuid);
+            customerState = check.state;
+            if (customerState !== 'storing') break;
+          } catch (_) {}
         }
-      } else {
-        customerGuid = `cust_cyb_${Date.now()}`;
-        customerState = 'unverified';
       }
     } catch (err) {
       this.logger.error(`Failed to create Cybrid customer for user ${userId}: ${err.message}`);
-      customerGuid = `cust_cyb_${Date.now()}`;
-      customerState = 'unverified';
+      throw new BadGatewayException(`Cybrid customer creation failed: ${err.message}`);
     }
 
     const cybridCustomer = await this.prisma.cybridCustomer.create({
@@ -106,6 +105,10 @@ export class CybridCustomerService {
     const bp = user?.businessProfile;
     const rep = user?.representative;
 
+    if (!bp?.legalName && !bp?.address && !customDetails) {
+      throw new BadRequestException('Business profile information is required to initiate KYB verification.');
+    }
+
     let verificationGuid: string;
     let verificationState = 'waiting';
     let outcome: string | undefined = undefined;
@@ -121,61 +124,53 @@ export class CybridCustomerService {
     const countryCode = normalizeCountry(bp?.country);
 
     try {
-      if (this.config.isConfigured) {
-        const verification = await this.cybridProvider.createIdentityVerification({
-          customerGuid: customer.cybridCustomerGuid,
-          type: 'kyc',
-          method: 'business_registration',
+      const verification = await this.cybridProvider.createIdentityVerification({
+        customerGuid: customer.cybridCustomerGuid,
+        type: 'kyc',
+        method: 'business_registration',
+        countryCode: countryCode,
+        name: {
+          first: rep?.fullName?.split(' ')[0] || 'Business',
+          last: rep?.fullName?.split(' ').slice(1).join(' ') || 'Owner',
+        },
+        address: {
+          street: bp?.addressLine1 || bp?.address || '100 Pine Street, Suite 2400',
+          city: bp?.city || 'San Francisco',
+          subdivision: bp?.businessState || bp?.stateOrProvince || 'CA',
+          postalCode: bp?.zipCode || bp?.postalCode || '94111',
           countryCode: countryCode,
-          name: {
-            first: rep?.fullName?.split(' ')[0] || 'Business',
-            last: rep?.fullName?.split(' ').slice(1).join(' ') || 'Owner',
-          },
-          address: {
-            street: bp?.addressLine1 || bp?.address || '100 Pine Street, Suite 2400',
-            city: bp?.city || 'San Francisco',
-            subdivision: bp?.businessState || bp?.stateOrProvince || 'CA',
-            postalCode: bp?.zipCode || bp?.postalCode || '94111',
-            countryCode: countryCode,
-          },
-          dateOfBirth: rep?.dob || '1988-04-12',
-          identificationType: 'tax_identification_number',
-          identificationValue: bp?.taxId || bp?.registrationNumber || '12-3456789',
-        });
+        },
+        dateOfBirth: rep?.dob || '1988-04-12',
+        identificationType: 'tax_identification_number',
+        identificationValue: bp?.taxId || bp?.registrationNumber || '12-3456789',
+      });
 
-        verificationGuid = verification.guid;
-        verificationState = verification.state;
-        outcome = verification.outcome;
+      verificationGuid = verification.guid;
+      verificationState = verification.state;
+      outcome = verification.outcome;
 
-        // Allow Cybrid sandbox to process verification and query live state
-        await new Promise((r) => setTimeout(r, 1000));
-        let liveCybridState = 'unverified';
-        try {
-          const cybridCheck = await this.cybridProvider.getCustomer(customer.cybridCustomerGuid);
-          liveCybridState = cybridCheck.state;
-          if (liveCybridState === 'verified') {
-            verificationState = 'completed';
-            outcome = 'passed';
-          }
-        } catch (_) {}
-      } else {
-        verificationGuid = `ver_cyb_${Date.now()}`;
-        verificationState = 'waiting';
-        outcome = 'pending';
-      }
+      // Allow Cybrid sandbox to process verification and query live state
+      await new Promise((r) => setTimeout(r, 1000));
+      let liveCybridState = 'unverified';
+      try {
+        const cybridCheck = await this.cybridProvider.getCustomer(customer.cybridCustomerGuid);
+        liveCybridState = cybridCheck.state;
+        if (liveCybridState === 'verified') {
+          verificationState = 'completed';
+          outcome = 'passed';
+        }
+      } catch (_) {}
     } catch (err) {
-      this.logger.warn(`Cybrid KYB API call failed: ${err.message}`);
-      verificationGuid = `ver_cyb_${Date.now()}`;
-      verificationState = 'waiting';
-      outcome = 'pending';
+      this.logger.error(`Cybrid KYB API call failed: ${err.message}`);
+      throw new BadGatewayException(`Cybrid identity verification failed: ${err.message}`);
     }
 
     // Strictly sync status with Cybrid live state
-    let newKybStatus = 'pending';
+    let newKybStatus: KybStatus = KybStatus.pending;
     if (verificationState === 'completed' && outcome === 'passed') {
-      newKybStatus = 'approved';
+      newKybStatus = KybStatus.approved;
     } else if (outcome === 'failed' || verificationState === 'rejected') {
-      newKybStatus = 'rejected';
+      newKybStatus = KybStatus.rejected;
     }
 
     const updatedCustomer = await this.prisma.cybridCustomer.update({

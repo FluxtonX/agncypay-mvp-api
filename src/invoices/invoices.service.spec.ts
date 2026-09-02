@@ -12,6 +12,7 @@ describe('InvoicesService', () => {
   let mockInvoiceRepo: any;
   let mockWalletsService: any;
   let mockAuditLogsService: any;
+  let mockEventEmitter: any;
 
   beforeEach(async () => {
     mockInvoiceRepo = {
@@ -30,6 +31,10 @@ describe('InvoicesService', () => {
       log: jest.fn().mockResolvedValue({ id: 'log1' }),
     };
 
+    mockEventEmitter = {
+      emit: jest.fn(),
+    };
+
     const mockPrisma = {
       bankDetails: { findUnique: jest.fn() },
       user: { findUnique: jest.fn().mockResolvedValue({ id: 'u1' }) },
@@ -43,7 +48,7 @@ describe('InvoicesService', () => {
         { provide: AuditLogsService, useValue: mockAuditLogsService },
         { provide: WalletsService, useValue: mockWalletsService },
         { provide: PrismaService, useValue: mockPrisma },
-        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: EventEmitter2, useValue: mockEventEmitter },
       ],
     }).compile();
 
@@ -74,6 +79,6 @@ describe('InvoicesService', () => {
     const result = await service.updateInvoiceStatus('W-INV-1001', 'paid');
 
     expect(result.status).toBe('paid');
-    expect(mockWalletsService.recordTransaction).toHaveBeenCalledTimes(2);
+    expect(mockEventEmitter.emit).toHaveBeenCalledWith('invoice.paid', { invoice: result });
   });
 });

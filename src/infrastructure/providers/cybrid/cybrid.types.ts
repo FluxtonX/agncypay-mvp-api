@@ -65,6 +65,17 @@ export interface CybridCustomerResponse {
   updated_at?: string;
 }
 
+export interface CybridCustomerListResponse {
+  total: number;
+  page: number;
+  per_page: number;
+  objects: CybridCustomerResponse[];
+}
+
+export interface CybridPatchCustomerRequest {
+  state?: string;
+}
+
 // ─── Identity Verification ──────────────────────────────────────
 
 export interface CybridCreateIdentityVerificationRequest {
@@ -262,16 +273,25 @@ export interface CybridQuoteResponse {
   updated_at?: string;
 }
 
-// ─── Transfer ───────────────────────────────────────────────────
+export interface CybridTransferParticipant {
+  type: 'customer' | 'bank' | 'counterparty';
+  guid: string;
+  amount: number;
+}
 
 export interface CybridCreateTransferRequest {
   quote_guid: string;
   transfer_type: 'funding' | 'crypto' | 'instant_funding' | 'inter_account' | 'lightning' | 'book';
   payment_rail?: 'ach' | 'eft' | 'wire' | 'rtp' | 'etransfer';
+  fiat_account_guid?: string;
   source_account_guid?: string;
   destination_account_guid?: string;
   external_bank_account_guid?: string;
   beneficiary_memo?: string;
+  source_participants?: CybridTransferParticipant[];
+  destination_participants?: CybridTransferParticipant[];
+  expected_state?: 'pending' | 'in_progress' | 'completed';
+  expected_behaviours?: string[];
   labels?: string[];
 }
 

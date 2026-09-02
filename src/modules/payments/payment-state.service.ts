@@ -18,7 +18,7 @@ export class PaymentStateService {
 
   private readonly validTransitions: Record<PaymentStatus, PaymentStatus[]> = {
     CREATED: ['PENDING_FUNDING', 'FAILED'],
-    PENDING_FUNDING: ['FUNDED', 'FAILED', 'REVIEW'],
+    PENDING_FUNDING: ['FUNDED', 'COMPLETED', 'FAILED', 'REVIEW'],
     FUNDED: ['PROCESSING', 'COMPLETED', 'FAILED'],
     PROCESSING: ['COMPLETED', 'FAILED', 'RETURNED', 'REVIEW'],
     COMPLETED: ['RETURNED'], // e.g. ACH chargeback/return

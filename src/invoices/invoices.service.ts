@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import * as bcrypt from 'bcrypt';
 import { InvoiceRepository } from '../infrastructure/database/repositories/invoice.repository';
 import { UserRepository } from '../infrastructure/database/repositories/user.repository';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
@@ -20,23 +21,38 @@ export class InvoicesService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async getInvoices() {
+  async getInvoices(userId?: string) {
+    if (userId) {
+      return this.prisma.invoice.findMany({
+        where: {
+          OR: [{ agencyId: userId }, { brandId: userId }],
+          deletedAt: null,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+    }
     return this.invoiceRepo.findMany();
   }
 
-  async getInvoiceById(id: string) {
+  async getInvoiceById(id: string, userId?: string) {
     const invoice = await this.invoiceRepo.findById(id);
     if (!invoice) {
       throw new NotFoundException(`Invoice with ID ${id} not found`);
     }
+
+    if (userId && invoice.agencyId !== userId && invoice.brandId !== userId) {
+      throw new ForbiddenException('Access denied to this invoice record');
+    }
+
     return invoice;
   }
 
   async createInvoice(data: {
+    currentUserId?: string;
     campaign: string;
-    agencyName: string;
+    agencyName?: string;
     agencyEmail: string;
-    brandName: string;
+    brandName?: string;
     brandEmail: string;
     amount: number;
     due: string;
@@ -44,10 +60,11 @@ export class InvoicesService {
   }) {
     let agencyUser = await this.userRepo.findByEmail(data.agencyEmail);
     if (!agencyUser) {
+      const hashedPassword = await bcrypt.hash('AgncyPayTempPass123!', 12);
       agencyUser = await this.userRepo.create({
         email: data.agencyEmail,
-        password: 'Password123!',
-        fullName: data.agencyName,
+        password: hashedPassword,
+        fullName: data.agencyName || 'Agency Workspace',
         accountType: 'agency',
         agncyId: `AGY-${Math.floor(100000 + Math.random() * 900000)}`,
       });
@@ -56,18 +73,19 @@ export class InvoicesService {
 
     let brandUser = await this.userRepo.findByEmail(data.brandEmail);
     if (!brandUser) {
+      const hashedPassword = await bcrypt.hash('AgncyPayTempPass123!', 12);
       brandUser = await this.userRepo.create({
         email: data.brandEmail,
-        password: 'Password123!',
-        fullName: data.brandName,
+        password: hashedPassword,
+        fullName: data.brandName || 'Brand Partner',
         accountType: 'brand',
         agncyId: `BRND-${Math.floor(100000 + Math.random() * 900000)}`,
       });
     }
     const brandWallet = await this.walletsService.getOrCreateWalletForUser(brandUser.id, 'brand');
 
-    const agencyName = data.agencyName || (agencyUser ? agencyUser.fullName : '') || data.agencyEmail || 'Agency Workspace';
-    const brandName = data.brandName || (brandUser ? brandUser.fullName : '') || data.brandEmail || 'Brand Partner';
+    const agencyName = data.agencyName || agencyUser.fullName || data.agencyEmail || 'Agency Workspace';
+    const brandName = data.brandName || brandUser.fullName || data.brandEmail || 'Brand Partner';
 
     const invNum = `W-INV-${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -82,7 +100,7 @@ export class InvoicesService {
       brandName: brandName,
       brandEmail: data.brandEmail,
       brandWalletId: brandWallet.id,
-      amount: data.amount,
+      amount: data.amount as any,
       due: data.due || 'Net-30',
       status: 'pending',
       payoutStatus: 'pending',
@@ -94,7 +112,7 @@ export class InvoicesService {
     });
 
     await this.auditLogsService.log({
-      userId: agencyUser.id,
+      userId: data.currentUserId || agencyUser.id,
       action: 'INVOICE_CREATED',
       entityType: 'Invoice',
       entityId: createdInvoice.id,
@@ -118,50 +136,24 @@ export class InvoicesService {
       throw new NotFoundException(`Invoice with ID ${id} not found`);
     }
 
+    if (userId && invoice.agencyId !== userId && invoice.brandId !== userId) {
+      throw new ForbiddenException('Access denied to update this invoice');
+    }
+
     const updated = await this.invoiceRepo.update(id, {
       status: status as InvoiceStatus,
       payoutStatus: (payoutStatus || invoice.payoutStatus) as PayoutStatus,
     });
 
     await this.auditLogsService.log({
-      userId,
+      userId: userId || invoice.agencyId,
       action: 'INVOICE_STATUS_UPDATED',
       entityType: 'Invoice',
       entityId: id,
       details: { previousStatus: invoice.status, newStatus: status, payoutStatus: updated.payoutStatus },
     });
 
-    // Handle internal double-entry wallet ledger entry if marked paid
     if (status === 'paid' && invoice.status !== 'paid') {
-      const brandWallet = await this.walletsService.getOrCreateWalletForUser(invoice.brandId, 'brand');
-      const agencyWallet = await this.walletsService.getOrCreateWalletForUser(invoice.agencyId, 'agency');
-
-      await this.walletsService.recordTransaction({
-        walletId: brandWallet.walletId,
-        type: 'debit',
-        amount: invoice.amount,
-        referenceType: 'INVOICE_PAYMENT',
-        referenceId: invoice.id,
-        description: `Payment for Invoice ${invoice.invoiceNumber}`,
-      });
-
-      await this.walletsService.recordTransaction({
-        walletId: agencyWallet.walletId,
-        type: 'credit',
-        amount: invoice.amount,
-        referenceType: 'INVOICE_PAYMENT',
-        referenceId: invoice.id,
-        description: `Settlement received for Invoice ${invoice.invoiceNumber}`,
-      });
-
-      await this.auditLogsService.log({
-        userId: invoice.brandId,
-        action: 'PAYMENT_INITIATED',
-        entityType: 'Invoice',
-        entityId: invoice.id,
-        details: { amount: invoice.amount },
-      });
-
       this.eventEmitter.emit('invoice.paid', { invoice: updated });
     }
 

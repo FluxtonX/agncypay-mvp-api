@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, BadGatewayException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { CybridConfigService } from '../../infrastructure/providers/cybrid/cybrid-config.service';
@@ -31,22 +31,22 @@ export class CybridAccountService {
 
     if (account) return account;
 
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
     let accountGuid: string;
     try {
-      if (this.config.isConfigured) {
-        const resp = await this.cybridProvider.createAccount({
-          type: 'fiat',
-          asset: 'USD',
-          customerGuid: customer.cybridCustomerGuid,
-          name: `Agency USD Fiat Account`,
-        });
-        accountGuid = resp.guid;
-      } else {
-        accountGuid = `acc_fiat_usd_${Date.now()}`;
-      }
+      const resp = await this.cybridProvider.createAccount({
+        type: 'fiat',
+        asset: 'USD',
+        customerGuid: customer.cybridCustomerGuid,
+        name: `Agency USD Fiat Account`,
+      });
+      accountGuid = resp.guid;
     } catch (err) {
-      this.logger.warn(`Cybrid createAccount API error, using fallback: ${err.message}`);
-      accountGuid = `acc_fiat_usd_${Date.now()}`;
+      this.logger.error(`Cybrid createAccount API error: ${err.message}`);
+      throw new BadGatewayException(`Failed to create Cybrid USD Fiat Account: ${err.message}`);
     }
 
     account = await this.prisma.cybridAccount.create({
@@ -90,22 +90,22 @@ export class CybridAccountService {
 
     if (account) return account;
 
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
     let accountGuid: string;
     try {
-      if (this.config.isConfigured) {
-        const resp = await this.cybridProvider.createAccount({
-          type: 'trading',
-          asset: 'USDC',
-          customerGuid: customer.cybridCustomerGuid,
-          name: `Agency USDC Trading Account`,
-        });
-        accountGuid = resp.guid;
-      } else {
-        accountGuid = `acc_trade_usdc_${Date.now()}`;
-      }
+      const resp = await this.cybridProvider.createAccount({
+        type: 'trading',
+        asset: 'USDC',
+        customerGuid: customer.cybridCustomerGuid,
+        name: `Agency USDC Trading Account`,
+      });
+      accountGuid = resp.guid;
     } catch (err) {
-      this.logger.warn(`Cybrid create trading account API error, using fallback: ${err.message}`);
-      accountGuid = `acc_trade_usdc_${Date.now()}`;
+      this.logger.error(`Cybrid create trading account API error: ${err.message}`);
+      throw new BadGatewayException(`Failed to create Cybrid USDC Trading Account: ${err.message}`);
     }
 
     account = await this.prisma.cybridAccount.create({
@@ -139,30 +139,34 @@ export class CybridAccountService {
 
     if (depositBank) return depositBank;
 
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
     let depGuid: string;
-    let routing = '111000025';
-    let accNum = `8800${Math.floor(100000 + Math.random() * 900000)}`;
-    let bankName = 'Evolve Bank & Trust / Cybrid Sandbox';
-    let memo = `AGY-${userId.substring(0, 8).toUpperCase()}`;
+    let routing: string;
+    let accNum: string;
+    let bankName: string;
+    let memo: string;
 
     try {
-      if (this.config.isConfigured) {
-        const resp = await this.cybridProvider.createDepositBankAccount({
-          accountGuid: fiatAccount.cybridAccountGuid,
-          type: 'main',
-          name: 'Agency Inbound Deposit Account',
-        });
-        depGuid = resp.guid;
-        routing = resp.routingNumber || routing;
-        accNum = resp.accountNumber || accNum;
-        bankName = resp.bankName || bankName;
-        memo = resp.uniqueMemoId || memo;
-      } else {
-        depGuid = `dba_cyb_${Date.now()}`;
+      const resp = await this.cybridProvider.createDepositBankAccount({
+        accountGuid: fiatAccount.cybridAccountGuid,
+        type: 'main',
+        name: 'Agency Inbound Deposit Account',
+      });
+      depGuid = resp.guid;
+      routing = resp.routingNumber || '';
+      accNum = resp.accountNumber || '';
+      bankName = resp.bankName || 'Evolve Bank & Trust';
+      memo = resp.uniqueMemoId || `AGY-${userId.substring(0, 8).toUpperCase()}`;
+
+      if (!routing || !accNum) {
+        throw new Error('Cybrid deposit account response did not include routing or account numbers');
       }
     } catch (err) {
-      this.logger.warn(`Cybrid createDepositBankAccount API error, using fallback: ${err.message}`);
-      depGuid = `dba_cyb_${Date.now()}`;
+      this.logger.error(`Cybrid createDepositBankAccount API error: ${err.message}`);
+      throw new BadGatewayException(`Failed to provision Cybrid Deposit Bank Account: ${err.message}`);
     }
 
     depositBank = await this.prisma.cybridDepositBankAccount.create({
@@ -198,47 +202,30 @@ export class CybridAccountService {
     });
 
     return {
-      beneficiaryName: user?.businessProfile?.legalName || user?.fullName || 'Agency Legal Entity',
+      beneficiaryName: user?.businessProfile?.legalName || user?.fullName || 'Agency Account',
       bankName: depositAccount.bankName || 'Evolve Bank & Trust / Cybrid',
       routingNumber: depositAccount.routingNumber,
       accountNumber: depositAccount.accountNumber,
       accountType: 'Checking',
-      memoOrReference: depositAccount.uniqueMemoId,
-      acceptedRails: ['ACH', 'Wire', 'RTP'],
-      instructions: `Send ACH, Wire, or RTP transfer to the details above. Funds will settle into your Agency USD Fiat Account upon provider confirmation.`,
+      memo: depositAccount.uniqueMemoId,
+      depositInstructions: `Send ACH or Wire to Routing ${depositAccount.routingNumber}, Account ${depositAccount.accountNumber}. Include memo ${depositAccount.uniqueMemoId} for automated attribution.`,
     };
   }
 
-  async getAccountBalances(userId: string): Promise<any> {
+  async syncBalances(userId: string): Promise<any> {
     const customer = await this.prisma.cybridCustomer.findUnique({
       where: { userId },
       include: { accounts: true },
     });
 
-    if (!customer) {
-      return { usdAvailable: 0, usdcAvailable: 0, accounts: [] };
+    if (!customer || !this.config.isConfigured) {
+      return { synced: false, accounts: [] };
     }
 
-    let usdBalance = 0;
-    let usdcBalance = 0;
-
-    for (const acc of customer.accounts) {
-      if (this.config.isConfigured) {
-        try {
-          const resp = await this.cybridProvider.getAccount(acc.cybridAccountGuid);
-          const platformBal = resp.platformAvailable ? parseFloat(resp.platformAvailable) : 0;
-          if (acc.asset === 'USD') usdBalance = platformBal;
-          if (acc.asset === 'USDC') usdcBalance = platformBal;
-        } catch (err) {
-          this.logger.warn(`Could not fetch real Cybrid balance for account ${acc.cybridAccountGuid}`);
-        }
-      }
-    }
-
+    const liveAccounts = await this.cybridProvider.listAccounts({ customerGuid: customer.cybridCustomerGuid });
     return {
-      usdAvailable: usdBalance,
-      usdcAvailable: usdcBalance,
-      accounts: customer.accounts,
+      synced: true,
+      accounts: liveAccounts,
     };
   }
 }

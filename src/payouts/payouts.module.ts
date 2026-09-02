@@ -6,7 +6,9 @@ import { AuditLogsModule } from '../modules/audit-logs/audit-logs.module';
 import { LedgerModule } from '../modules/ledger/ledger.module';
 import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
 import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
+import { ExternalBankAccountService } from '../modules/cybrid/external-bank-account.service';
 import { PayoutStateService } from '../modules/payouts/payout-state.service';
+import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
 
 @Module({
   imports: [PrismaModule, AuditLogsModule, LedgerModule],
@@ -16,6 +18,8 @@ import { PayoutStateService } from '../modules/payouts/payout-state.service';
     PayoutStateService,
     CybridCustomerService,
     CybridAccountService,
+    ExternalBankAccountService,
+    PlaidProvider,
   ],
   exports: [PayoutsService, PayoutStateService],
 })

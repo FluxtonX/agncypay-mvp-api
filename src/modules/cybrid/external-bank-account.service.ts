@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, BadGatewayException, Logger, Inject } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { PlaidProvider } from '../../infrastructure/providers/plaid/plaid.provider';
@@ -42,27 +42,27 @@ export class ExternalBankAccountService {
       throw new BadRequestException(`Talent does not have a linked Cybrid Counterparty`);
     }
 
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
     const mask = data.accountNumber.length >= 4 ? data.accountNumber.slice(-4) : 'XXXX';
     let externalBankGuid: string;
 
     try {
-      if (this.config.isConfigured) {
-        const resp = await this.cybridProvider.createExternalBankAccount({
-          name: `${talent.fullName} - ${data.bankName}`,
-          asset: 'USD',
-          accountKind: 'raw_routing_details',
-          routingNumberType: 'ABA',
-          routingNumber: data.routingNumber,
-          accountNumber: data.accountNumber,
-          counterpartyGuid: counterparty.cybridCounterpartyGuid,
-        });
-        externalBankGuid = resp.guid;
-      } else {
-        externalBankGuid = `eba_cyb_${Date.now()}`;
-      }
+      const resp = await this.cybridProvider.createExternalBankAccount({
+        name: `${talent.fullName} - ${data.bankName}`,
+        asset: 'USD',
+        accountKind: 'raw_routing_details',
+        routingNumberType: 'ABA',
+        routingNumber: data.routingNumber,
+        accountNumber: data.accountNumber,
+        counterpartyGuid: counterparty.cybridCounterpartyGuid,
+      });
+      externalBankGuid = resp.guid;
     } catch (err) {
-      this.logger.warn(`Cybrid create external bank account failed, using sandbox fallback: ${err.message}`);
-      externalBankGuid = `eba_cyb_${Date.now()}`;
+      this.logger.error(`Cybrid create external bank account failed: ${err.message}`);
+      throw new BadGatewayException(`Failed to link external bank account for talent: ${err.message}`);
     }
 
     const extAccount = await this.prisma.cybridExternalBankAccount.create({
@@ -114,34 +114,34 @@ export class ExternalBankAccountService {
       throw new NotFoundException(`Agency ${data.agencyId} not found`);
     }
 
+    if (!this.config.isConfigured || !user.cybridCustomer) {
+      throw new BadGatewayException('Cybrid customer not provisioned or Cybrid unconfigured.');
+    }
+
     const mask = data.accountNumber.length >= 4 ? data.accountNumber.slice(-4) : 'XXXX';
     let externalBankGuid: string;
 
     try {
-      if (this.config.isConfigured && user.cybridCustomer) {
-        const resp = await this.cybridProvider.createExternalBankAccount({
-          name: data.accountName,
-          asset: 'USD',
-          accountKind: 'raw_routing_details',
-          routingNumberType: 'ABA',
-          routingNumber: data.routingNumber,
-          accountNumber: data.accountNumber,
-          customerGuid: user.cybridCustomer.cybridCustomerGuid,
-        });
-        externalBankGuid = resp.guid;
-      } else {
-        externalBankGuid = `eba_agency_${Date.now()}`;
-      }
+      const resp = await this.cybridProvider.createExternalBankAccount({
+        name: data.accountName,
+        asset: 'USD',
+        accountKind: 'raw_routing_details',
+        routingNumberType: 'ABA',
+        routingNumber: data.routingNumber,
+        accountNumber: data.accountNumber,
+        customerGuid: user.cybridCustomer.cybridCustomerGuid,
+      });
+      externalBankGuid = resp.guid;
     } catch (err) {
-      this.logger.warn(`Cybrid agency external bank link failed, using fallback: ${err.message}`);
-      externalBankGuid = `eba_agency_${Date.now()}`;
+      this.logger.error(`Cybrid agency external bank link failed: ${err.message}`);
+      throw new BadGatewayException(`Failed to link agency external bank account: ${err.message}`);
     }
 
     // Save in CybridExternalBankAccount
     const extAccount = await this.prisma.cybridExternalBankAccount.create({
       data: {
         cybridExternalBankGuid: externalBankGuid,
-        customerGuid: user.cybridCustomer?.cybridCustomerGuid,
+        customerGuid: user.cybridCustomer.cybridCustomerGuid,
         agencyUserId: data.agencyId,
         bankName: data.bankName,
         mask,
@@ -151,15 +151,8 @@ export class ExternalBankAccountService {
       },
     });
 
-    // Also sync to AgencyExternalAccount for backwards compatibility with existing UI
-    if (data.isPrimary) {
-      await this.prisma.agencyExternalAccount.updateMany({
-        where: { agencyId: data.agencyId },
-        data: { isPrimary: false },
-      });
-    }
-
-    const legacyAccount = await this.prisma.agencyExternalAccount.create({
+    // Also register in AgencyExternalAccount for compatibility
+    await this.prisma.agencyExternalAccount.create({
       data: {
         agencyId: data.agencyId,
         accountName: data.accountName,
@@ -167,7 +160,7 @@ export class ExternalBankAccountService {
         accountNumberMask: mask,
         routingNumber: data.routingNumber,
         providerExternalAccountId: externalBankGuid,
-        isPrimary: data.isPrimary ?? false,
+        isPrimary: data.isPrimary || false,
       },
     });
 
@@ -179,77 +172,59 @@ export class ExternalBankAccountService {
       details: { externalBankGuid, bankName: data.bankName, mask },
     });
 
-    return { extAccount, legacyAccount };
+    return extAccount;
   }
 
   /**
-   * Link via Plaid processor token
+   * Link external bank using Plaid processor token
    */
-  async linkViaPlaidProcessorToken(data: {
-    userId: string;
-    publicToken: string;
-    accountId: string;
-    talentId?: string;
+  async linkWithPlaidProcessorToken(data: {
+    agencyId: string;
+    accountName: string;
+    plaidProcessorToken: string;
+    plaidInstitutionId?: string;
   }) {
-    // 1. Exchange Plaid public token for access token
-    const plaidRes = await this.plaidProvider.exchangePublicToken({
-      userId: data.userId,
-      publicToken: data.publicToken,
+    const user = await this.prisma.user.findUnique({
+      where: { id: data.agencyId },
+      include: { cybridCustomer: true },
     });
 
-    // 2. Create processor token for Cybrid
-    const processorToken = await this.plaidProvider.createProcessorToken(
-      plaidRes.accessToken,
-      data.accountId,
-      'cybrid',
-    );
-
-    const selectedAcc = plaidRes.accounts.find((a) => a.accountId === data.accountId) || plaidRes.accounts[0];
-    const mask = selectedAcc?.accountNumberMask || 'XXXX';
-    const bankName = selectedAcc?.bankName || 'Plaid Linked Bank';
-
-    let externalBankGuid = `eba_plaid_${Date.now()}`;
-
-    if (data.talentId) {
-      const talent = await this.prisma.talent.findFirst({
-        where: { id: data.talentId, agencyId: data.userId, deletedAt: null },
-        include: { counterparties: true },
-      });
-
-      if (!talent || !talent.counterparties[0]) {
-        throw new NotFoundException('Talent or counterparty not found');
-      }
-
-      const counterparty = talent.counterparties[0];
-
-      try {
-        if (this.config.isConfigured) {
-          const resp = await this.cybridProvider.createExternalBankAccount({
-            name: `${talent.fullName} - ${bankName}`,
-            asset: 'USD',
-            accountKind: 'plaid_processor_token',
-            plaidProcessorToken: processorToken,
-            counterpartyGuid: counterparty.cybridCounterpartyGuid,
-          });
-          externalBankGuid = resp.guid;
-        }
-      } catch (err) {
-        this.logger.warn(`Cybrid plaid link error, using fallback: ${err.message}`);
-      }
-
-      return this.prisma.cybridExternalBankAccount.create({
-        data: {
-          cybridCounterpartyId: counterparty.id,
-          cybridExternalBankGuid: externalBankGuid,
-          bankName,
-          mask,
-          accountKind: 'plaid_processor_token',
-          asset: 'USD',
-          status: 'completed',
-        },
-      });
+    if (!user || !user.cybridCustomer) {
+      throw new NotFoundException(`Agency Cybrid Customer not found for ${data.agencyId}`);
     }
 
-    return { success: true, externalBankGuid };
+    if (!this.config.isConfigured) {
+      throw new BadGatewayException('Cybrid configuration credentials missing in environment.');
+    }
+
+    let externalBankGuid: string;
+    try {
+      const resp = await this.cybridProvider.createExternalBankAccount({
+        name: data.accountName,
+        asset: 'USD',
+        accountKind: 'plaid_processor_token',
+        plaidProcessorToken: data.plaidProcessorToken,
+        customerGuid: user.cybridCustomer.cybridCustomerGuid,
+      });
+      externalBankGuid = resp.guid;
+    } catch (err) {
+      this.logger.error(`Cybrid Plaid processor token link failed: ${err.message}`);
+      throw new BadGatewayException(`Failed to link bank with Plaid processor token: ${err.message}`);
+    }
+
+    const extAccount = await this.prisma.cybridExternalBankAccount.create({
+      data: {
+        cybridExternalBankGuid: externalBankGuid,
+        customerGuid: user.cybridCustomer.cybridCustomerGuid,
+        agencyUserId: data.agencyId,
+        bankName: data.accountName,
+        accountKind: 'plaid_processor_token',
+        plaidInstitutionId: data.plaidInstitutionId,
+        asset: 'USD',
+        status: 'completed',
+      },
+    });
+
+    return extAccount;
   }
 }

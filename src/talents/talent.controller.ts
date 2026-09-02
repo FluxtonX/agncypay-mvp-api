@@ -33,6 +33,38 @@ export class TalentController {
     });
   }
 
+  @ApiOperation({ summary: 'Bulk import or update talent roster from Agency CRM / CSV export' })
+  @Post('roster/import')
+  async importRoster(
+    @CurrentUser('id') agencyId: string,
+    @Body('roster') roster: Array<{
+      externalTalentId?: string;
+      fullName: string;
+      email?: string;
+      phone?: string;
+      country?: string;
+      isInternational?: boolean;
+      metadata?: Record<string, any>;
+    }>,
+  ) {
+    return this.talentService.importTalentRoster(agencyId, roster || []);
+  }
+
+  @ApiOperation({ summary: 'Link an external bank account to a Talent for payouts' })
+  @Post(':id/bank-account')
+  async linkBankAccount(
+    @Param('id') talentId: string,
+    @CurrentUser('id') agencyId: string,
+    @Body() bankData: {
+      bankName: string;
+      accountNumber: string;
+      routingNumber: string;
+      accountHolderName?: string;
+    },
+  ) {
+    return this.talentService.linkBankAccount(talentId, agencyId, bankData);
+  }
+
   @ApiOperation({ summary: 'Get all Talents for the current Agency' })
   @Get()
   async getTalents(@CurrentUser('id') agencyId: string) {
@@ -46,6 +78,33 @@ export class TalentController {
     @CurrentUser('id') agencyId: string,
   ) {
     return this.talentService.getTalentById(id, agencyId);
+  }
+
+  @ApiOperation({ summary: 'Get payout history for a specific Talent' })
+  @Get(':id/payouts')
+  async getTalentPayouts(
+    @Param('id') id: string,
+    @CurrentUser('id') agencyId: string,
+  ) {
+    return this.talentService.getTalentPayouts(id, agencyId);
+  }
+
+  @ApiOperation({ summary: 'Get total earnings summary for a specific Talent' })
+  @Get(':id/earnings')
+  async getTalentEarnings(
+    @Param('id') id: string,
+    @CurrentUser('id') agencyId: string,
+  ) {
+    return this.talentService.getTalentEarnings(id, agencyId);
+  }
+
+  @ApiOperation({ summary: 'Get banking and counterparty information for a Talent' })
+  @Get(':id/banking')
+  async getTalentBanking(
+    @Param('id') id: string,
+    @CurrentUser('id') agencyId: string,
+  ) {
+    return this.talentService.getTalentBanking(id, agencyId);
   }
 
   @ApiOperation({ summary: 'Update Talent profile' })
@@ -67,3 +126,4 @@ export class TalentController {
     return this.talentService.deleteTalent(id, agencyId);
   }
 }
+

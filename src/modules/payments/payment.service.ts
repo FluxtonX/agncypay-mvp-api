@@ -33,11 +33,27 @@ export class PaymentService {
     const brand = await this.prisma.user.findUnique({ where: { id: data.brandId } });
     if (!brand) throw new NotFoundException(`Brand user ${data.brandId} not found`);
 
-    const agency = await this.prisma.user.findUnique({ where: { id: data.agencyId } });
-    if (!agency) throw new NotFoundException(`Agency user ${data.agencyId} not found`);
+    let targetAgencyId = data.agencyId;
+    let targetAmount = data.amount;
+
+    if (data.invoiceId) {
+      const invoice = await this.prisma.invoice.findUnique({ where: { id: data.invoiceId } });
+      if (invoice) {
+        targetAgencyId = invoice.agencyId;
+        if (!targetAmount) targetAmount = Number(invoice.amount);
+        // Mark invoice as processing
+        await this.prisma.invoice.update({
+          where: { id: data.invoiceId },
+          data: { status: 'processing' },
+        });
+      }
+    }
+
+    const agency = await this.prisma.user.findUnique({ where: { id: targetAgencyId } });
+    if (!agency) throw new NotFoundException(`Agency user ${targetAgencyId} not found`);
 
     // Ensure Agency has a Cybrid Deposit Bank Account for receiving external funds
-    const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(data.agencyId);
+    const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(targetAgencyId);
 
     const paymentNumber = `PAY-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -45,9 +61,9 @@ export class PaymentService {
       data: {
         paymentNumber,
         brandId: data.brandId,
-        agencyId: data.agencyId,
+        agencyId: targetAgencyId,
         invoiceId: data.invoiceId,
-        amount: data.amount,
+        amount: targetAmount,
         currency: data.currency || 'USD',
         status: 'PENDING_FUNDING',
         paymentMethod: data.paymentMethod || 'ach',
@@ -63,14 +79,14 @@ export class PaymentService {
       entityId: payment.id,
       details: {
         paymentNumber,
-        amount: data.amount,
-        agencyId: data.agencyId,
+        amount: targetAmount,
+        agencyId: targetAgencyId,
         depositRef: payment.cybridDepositRef,
       },
     });
 
     // Return payment with funding instructions for the Brand
-    const fundingInstructions = await this.cybridAccountService.getAgencyFundingInstructions(data.agencyId);
+    const fundingInstructions = await this.cybridAccountService.getAgencyFundingInstructions(targetAgencyId);
 
     return {
       payment,
@@ -129,7 +145,7 @@ export class PaymentService {
     await this.ledgerService.postJournalEntry({
       debitAccountCode: `CLEARING:CYBRID_DEPOSIT:USD`,
       creditAccountCode: `AGENCY:${payment.agencyId}:USD`,
-      amount: payment.amount,
+      amount: Number(payment.amount),
       currency: payment.currency,
       referenceType: 'BRAND_PAYMENT_FUNDED',
       referenceId: payment.id,
@@ -137,10 +153,44 @@ export class PaymentService {
       description: `Inbound funding for Payment ${payment.paymentNumber} from Brand`,
     });
 
-    // Transition to COMPLETED
-    const completedPayment = await this.paymentStateService.transition(paymentId, 'COMPLETED');
+    // Update invoice if linked — mark as funded (not disbursed, as payouts haven't happened yet)
+    if (payment.invoiceId) {
+      await this.prisma.invoice.update({
+        where: { id: payment.invoiceId },
+        data: { status: 'paid' },
+      });
+    }
 
-    return completedPayment;
+    // Sync legacy Wallet balance
+    try {
+      const ledgerBal = await this.ledgerService.getAccountBalance(`AGENCY:${payment.agencyId}:USD`);
+      const existing = await this.prisma.wallet.findFirst({ where: { userId: payment.agencyId } });
+      if (existing) {
+        await this.prisma.wallet.update({
+          where: { id: existing.id },
+          data: { balance: ledgerBal.balance },
+        });
+      } else {
+        await this.prisma.wallet.create({
+          data: {
+            walletId: `WAL-AGY-${Math.floor(100000 + Math.random() * 900000)}`,
+            userId: payment.agencyId,
+            accountType: 'agency',
+            balance: ledgerBal.balance,
+            currency: 'USD',
+            status: 'active',
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.warn(`Could not sync wallet for agency ${payment.agencyId}: ${err.message}`);
+    }
+
+    // NOTE: Payment stays in FUNDED state.
+    // It transitions to COMPLETED only when the webhook handler confirms
+    // the Cybrid transfer has fully settled.
+
+    return await this.prisma.payment.findUnique({ where: { id: paymentId } });
   }
 
   async getPaymentById(paymentId: string, requestingUserId: string) {
@@ -183,3 +233,4 @@ export class PaymentService {
     return this.cybridAccountService.getAgencyFundingInstructions(payment.agencyId);
   }
 }
+

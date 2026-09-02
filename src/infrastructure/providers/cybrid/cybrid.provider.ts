@@ -31,6 +31,8 @@ import {
 } from '../../../core/interfaces/financial-provider.interface';
 import {
   CybridCustomerResponse,
+  CybridCustomerListResponse,
+  CybridPatchCustomerRequest,
   CybridCreateCustomerRequest,
   CybridIdentityVerificationResponse,
   CybridCreateIdentityVerificationRequest,
@@ -98,6 +100,40 @@ export class CybridProvider implements IFinancialProvider {
   async getCustomer(guid: string): Promise<CustomerResponse> {
     const resp = await this.http.get<CybridCustomerResponse>(
       `/api/customers/${guid}`,
+    );
+    return this.mapCustomerResponse(resp);
+  }
+
+  async listCustomers(params?: {
+    page?: number;
+    perPage?: number;
+    type?: string;
+    guid?: string;
+    label?: string;
+    includePii?: boolean;
+  }): Promise<CustomerResponse[]> {
+    const query: Record<string, any> = {};
+    if (params?.page !== undefined) query.page = params.page;
+    if (params?.perPage !== undefined) query.per_page = params.perPage;
+    if (params?.type) query.type = params.type;
+    if (params?.guid) query.guid = params.guid;
+    if (params?.label) query.label = params.label;
+    if (params?.includePii) query.include_pii = params.includePii;
+
+    const resp = await this.http.get<CybridCustomerListResponse>(
+      '/api/customers',
+      query,
+    );
+    return resp.objects.map((c: CybridCustomerResponse) => this.mapCustomerResponse(c));
+  }
+
+  async updateCustomer(guid: string, params: { state?: string }): Promise<CustomerResponse> {
+    const body: CybridPatchCustomerRequest = {};
+    if (params.state) body.state = params.state;
+
+    const resp = await this.http.patch<CybridCustomerResponse>(
+      `/api/customers/${guid}`,
+      body,
     );
     return this.mapCustomerResponse(resp);
   }
@@ -336,6 +372,7 @@ export class CybridProvider implements IFinancialProvider {
       product_type: params.productType,
       customer_guid: params.customerGuid,
       asset: params.asset,
+      symbol: params.symbol || (params.productType === 'trading' ? 'USDC-USD' : undefined),
       side: params.side,
       receive_amount: params.receiveAmount,
       deliver_amount: params.deliverAmount,
@@ -364,11 +401,22 @@ export class CybridProvider implements IFinancialProvider {
       quote_guid: params.quoteGuid,
       transfer_type: params.transferType,
       payment_rail: params.paymentRail,
+      fiat_account_guid: params.fiatAccountGuid,
       source_account_guid: params.sourceAccountGuid,
       destination_account_guid: params.destinationAccountGuid,
       external_bank_account_guid: params.externalBankAccountGuid,
       beneficiary_memo: params.beneficiaryMemo,
+      source_participants: params.sourceParticipants?.map(p => ({ type: p.type, guid: p.guid, amount: p.amount })),
+      destination_participants: params.destinationParticipants?.map(p => ({ type: p.type, guid: p.guid, amount: p.amount })),
+      labels: params.labels,
     };
+
+    if (this.config.isSandbox && params.expectedState) {
+      body.expected_state = params.expectedState;
+    }
+    if (this.config.isSandbox && params.expectedBehaviours) {
+      body.expected_behaviours = params.expectedBehaviours;
+    }
 
     const resp = await this.http.post<CybridTransferResponse>(
       '/api/transfers',
@@ -380,6 +428,13 @@ export class CybridProvider implements IFinancialProvider {
 
   async getTransfer(guid: string): Promise<TransferResponse> {
     const resp = await this.http.get<CybridTransferResponse>(
+      `/api/transfers/${guid}`,
+    );
+    return this.mapTransferResponse(resp);
+  }
+
+  async cancelTransfer(guid: string): Promise<TransferResponse> {
+    const resp = await this.http.delete<CybridTransferResponse>(
       `/api/transfers/${guid}`,
     );
     return this.mapTransferResponse(resp);

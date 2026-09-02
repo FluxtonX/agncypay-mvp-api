@@ -9,6 +9,8 @@ import { PayoutStateService } from '../modules/payouts/payout-state.service';
 import { CybridConfigService } from '../infrastructure/providers/cybrid/cybrid-config.service';
 import { BadRequestException } from '@nestjs/common';
 
+import { ExternalBankAccountService } from '../modules/cybrid/external-bank-account.service';
+
 describe('PayoutsService', () => {
   let service: PayoutsService;
   let mockPrisma: any;
@@ -16,12 +18,14 @@ describe('PayoutsService', () => {
   let mockLedgerService: any;
   let mockCustomerService: any;
   let mockAccountService: any;
+  let mockExternalBankAccountService: any;
   let mockPayoutStateService: any;
   let mockCybridConfig: any;
   let mockCybridProvider: any;
 
   beforeEach(async () => {
     mockPrisma = {
+      $transaction: jest.fn(async (cb) => cb(mockPrisma)),
       user: {
         findUnique: jest.fn(),
         update: jest.fn(),
@@ -29,11 +33,27 @@ describe('PayoutsService', () => {
       talent: {
         findFirst: jest.fn(),
       },
+      ledgerAccount: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'la_1', accountCode: 'AGENCY:agency-1:USD' }),
+      },
+      journalEntry: {
+        aggregate: jest.fn().mockImplementation(async (params) => {
+          if (params?.where?.creditAccountId) {
+            return { _sum: { amount: 50000 } };
+          }
+          return { _sum: { amount: 0 } };
+        }),
+        create: jest.fn().mockResolvedValue({ id: 'je_res_1', status: 'pending' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       agencyExternalAccount: {
         create: jest.fn(),
         findMany: jest.fn(),
         findFirst: jest.fn(),
         updateMany: jest.fn(),
+      },
+      cybridExternalBankAccount: {
+        findFirst: jest.fn().mockResolvedValue({ status: 'completed' }),
       },
       paymentPayout: {
         create: jest.fn(),
@@ -42,6 +62,11 @@ describe('PayoutsService', () => {
         findUnique: jest.fn(),
       },
       providerOperation: {
+        create: jest.fn(),
+      },
+      wallet: {
+        findFirst: jest.fn(),
+        update: jest.fn(),
         create: jest.fn(),
       },
       payout: {
@@ -58,6 +83,7 @@ describe('PayoutsService', () => {
 
     mockLedgerService = {
       getAccountBalance: jest.fn().mockResolvedValue({ balance: 50000 }),
+      getOrCreateAccount: jest.fn().mockResolvedValue({ id: 'la_1' }),
       postJournalEntry: jest.fn().mockResolvedValue({ id: 'je1' }),
     };
 
@@ -70,18 +96,22 @@ describe('PayoutsService', () => {
       ensureTradingAccount: jest.fn().mockResolvedValue({ id: 'acc2', cybridAccountGuid: 'acc_guid2' }),
     };
 
+    mockExternalBankAccountService = {
+      linkAgencyBankAccount: jest.fn().mockResolvedValue({ id: 'ext-acc-1' }),
+    };
+
     mockPayoutStateService = {
       transition: jest.fn().mockResolvedValue({ id: 'payout1' }),
     };
 
     mockCybridConfig = {
-      isConfigured: false,
+      isConfigured: true,
     };
 
     mockCybridProvider = {
-      createQuote: jest.fn(),
-      createTransfer: jest.fn(),
-      createTrade: jest.fn(),
+      createQuote: jest.fn().mockResolvedValue({ guid: 'quote-1' }),
+      createTransfer: jest.fn().mockResolvedValue({ guid: 'transfer-1' }),
+      createTrade: jest.fn().mockResolvedValue({ guid: 'trade-1' }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -92,6 +122,7 @@ describe('PayoutsService', () => {
         { provide: LedgerService, useValue: mockLedgerService },
         { provide: CybridCustomerService, useValue: mockCustomerService },
         { provide: CybridAccountService, useValue: mockAccountService },
+        { provide: ExternalBankAccountService, useValue: mockExternalBankAccountService },
         { provide: PayoutStateService, useValue: mockPayoutStateService },
         { provide: CybridConfigService, useValue: mockCybridConfig },
         { provide: 'IFinancialProvider', useValue: mockCybridProvider },
@@ -173,7 +204,7 @@ describe('PayoutsService', () => {
     mockPrisma.paymentPayout.create.mockResolvedValue({
       id: 'po-1',
       amount: 1000,
-      status: 'VALIDATING',
+      status: 'RESERVED',
     });
 
     mockPrisma.paymentPayout.update.mockResolvedValue({
@@ -189,7 +220,14 @@ describe('PayoutsService', () => {
     });
 
     expect(result.id).toBe('po-1');
-    expect(mockLedgerService.postJournalEntry).toHaveBeenCalled();
+    expect(mockPrisma.journalEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'pending',
+          referenceType: 'DOMESTIC_TALENT_PAYOUT',
+        }),
+      }),
+    );
   });
 
   it('should throw BadRequestException on non-positive payout amount', async () => {

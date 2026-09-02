@@ -74,7 +74,7 @@ model Wallet {
   userId      String        @unique
   user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   accountType AccountType
-  balance     Float         @default(0.0)
+  balance     Decimal       @default(0.0) @db.Decimal(18, 4)
   currency    String        @default("USD")
   status      WalletStatus  @default(active)
   createdAt   DateTime      @default(now())
@@ -99,8 +99,8 @@ model WalletLedger {
   walletId      String
   wallet        Wallet     @relation(fields: [walletId], references: [id], onDelete: Cascade)
   type          LedgerType
-  amount        Float
-  balanceAfter  Float
+  amount        Decimal    @db.Decimal(18, 4)
+  balanceAfter  Decimal    @db.Decimal(18, 4)
   referenceType String     // INVOICE_PAYMENT, DEPOSIT, DISBURSEMENT
   referenceId   String?
   description   String     @default("")
@@ -397,7 +397,7 @@ model Invoice {
   brandEmail     String
   brandWalletId  String?
   brandWallet    Wallet?       @relation("BrandWalletInvoices", fields: [brandWalletId], references: [id])
-  amount         Float
+  amount         Decimal       @db.Decimal(18, 4)
   due            String
   status         InvoiceStatus @default(pending)
   payoutStatus   PayoutStatus  @default(pending)
@@ -458,7 +458,7 @@ model Payout {
   id                           String       @id @default(uuid())
   agencyId                     String
   agency                       User         @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  amount                       Float
+  amount                       Decimal      @db.Decimal(18, 4)
   currency                     String       @default("USD")
   destinationExternalAccountId String
   paymentOrderId               String?      @unique
@@ -478,6 +478,7 @@ model WebhookEvent {
   payload     Json     @default("{}")
   processedAt DateTime @default(now())
 
+  @@index([eventId, eventType])
   @@map("webhook_events")
 }
 
@@ -487,7 +488,7 @@ model Transaction {
   invoice        Invoice           @relation(fields: [invoiceId], references: [id])
   userId         String
   user           User              @relation(fields: [userId], references: [id])
-  amount         Float
+  amount         Decimal           @db.Decimal(18, 4)
   currency       String            @default("USD")
   timestamp      DateTime          @default(now())
   paymentMethod  String            @default("")
@@ -512,8 +513,8 @@ model BrandTreasury {
   id                String    @id @default(uuid())
   userId            String    @unique
   user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  balance           Float     @default(25000)
-  lastDepositAmount Float?
+  balance           Decimal   @default(0.0) @db.Decimal(18, 4)
+  lastDepositAmount Decimal?  @db.Decimal(18, 4)
   lastDepositMethod String?
   lastUpdated       DateTime  @default(now())
   createdAt         DateTime  @default(now())
@@ -626,7 +627,7 @@ model QuickBooksInvoice {
   quickbooksInvoiceId String
   invoiceNumber       String
   customerName        String
-  amount              Float
+  amount              Decimal  @db.Decimal(18, 4)
   currency            String   @default("USD")
   issueDate           String
   dueDate             String
@@ -675,6 +676,7 @@ model CybridAccount {
 
   depositBankAccounts   CybridDepositBankAccount[]
 
+  @@index([cybridCustomerId, accountType, asset])
   @@map("cybrid_accounts")
 }
 
@@ -694,6 +696,7 @@ model CybridDepositBankAccount {
   createdAt                DateTime  @default(now())
   updatedAt                DateTime  @updatedAt
 
+  @@index([cybridAccountId])
   @@map("cybrid_deposit_bank_accounts")
 }
 
@@ -769,7 +772,7 @@ model Payment {
   agencyId            String
   agency              User      @relation("PaymentAgency", fields: [agencyId], references: [id])
   invoiceId           String?
-  amount              Float
+  amount              Decimal   @db.Decimal(18, 4)
   currency            String    @default("USD")
   status              String    @default("CREATED")
   paymentMethod       String    @default("ach")
@@ -791,6 +794,9 @@ model Payment {
   payouts             PaymentPayout[]
   providerOperations  ProviderOperation[] @relation("PaymentOperations")
 
+  @@index([agencyId, status])
+  @@index([brandId, status])
+  @@index([cybridTransferGuid])
   @@map("payments")
 }
 
@@ -805,7 +811,7 @@ model PaymentPayout {
   agency                 User      @relation("PayoutAgency", fields: [agencyId], references: [id])
   talentId               String?
   talent                 Talent?   @relation(fields: [talentId], references: [id])
-  amount                 Float
+  amount                 Decimal   @db.Decimal(18, 4)
   currency               String    @default("USD")
   payoutType             String    @default("domestic")   // domestic, international, agency_withdrawal
   status                 String    @default("CREATED")
@@ -824,9 +830,9 @@ model PaymentPayout {
   failureStage           String?
 
   // FX info (international)
-  fxRate                 Float?
-  fxFee                  Float?
-  destinationAmount      Float?
+  fxRate                 Decimal?  @db.Decimal(18, 4)
+  fxFee                  Decimal?  @db.Decimal(18, 4)
+  destinationAmount      Decimal?  @db.Decimal(18, 4)
   destinationCurrency    String?
 
   completedAt            DateTime?
@@ -837,6 +843,10 @@ model PaymentPayout {
 
   providerOperations     ProviderOperation[] @relation("PayoutOperations")
 
+  @@index([agencyId, status])
+  @@index([talentId])
+  @@index([cybridTransferGuid])
+  @@index([cybridTradeGuid])
   @@map("payment_payouts")
 }
 
@@ -880,7 +890,7 @@ model JournalEntry {
   id                  String    @id @default(uuid())
   debitAccountId      String
   creditAccountId     String
-  amount              Float
+  amount              Decimal   @db.Decimal(18, 4)
   currency            String    @default("USD")
   status              String    @default("posted")  // posted, pending, reversed
   referenceType       String    // PAYMENT, PAYOUT, FEE, TRADE, REFUND
@@ -891,6 +901,10 @@ model JournalEntry {
   createdAt           DateTime  @default(now())
 
   // Immutable — no updatedAt
+  @@index([debitAccountId, status])
+  @@index([creditAccountId, status])
+  @@index([postedAt])
+  @@index([referenceType, referenceId])
   @@map("journal_entries")
 }
 
@@ -903,8 +917,8 @@ model ReconciliationRecord {
   entityId            String?
   cybridState         String?
   internalState       String?
-  cybridAmount        Float?
-  internalAmount      Float?
+  cybridAmount        Decimal?  @db.Decimal(18, 4)
+  internalAmount      Decimal?  @db.Decimal(18, 4)
   discrepancyType     String?   // 'status_mismatch', 'amount_mismatch', 'missing_internal', 'missing_cybrid'
   resolution          String?   @default("unresolved")
   resolvedAt          DateTime?
@@ -913,6 +927,7 @@ model ReconciliationRecord {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
+  @@index([resolution, createdAt])
   @@map("reconciliation_records")
 }
 

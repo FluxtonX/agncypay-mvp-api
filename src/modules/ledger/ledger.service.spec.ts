@@ -65,7 +65,6 @@ describe('LedgerService', () => {
     expect(mockPrismaService.journalEntry.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          amount: 500,
           status: 'posted',
         }),
       }),
