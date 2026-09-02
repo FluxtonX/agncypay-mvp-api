@@ -28,10 +28,8 @@ describe('PayoutsService', () => {
       $transaction: jest.fn(async (cb) => cb(mockPrisma)),
       user: {
         findUnique: jest.fn(),
-        update: jest.fn(),
-      },
-      talent: {
         findFirst: jest.fn(),
+        update: jest.fn(),
       },
       ledgerAccount: {
         findUnique: jest.fn().mockResolvedValue({ id: 'la_1', accountCode: 'AGENCY:agency-1:USD' }),
@@ -189,10 +187,11 @@ describe('PayoutsService', () => {
   });
 
   it('should request domestic talent payout', async () => {
-    mockPrisma.talent.findFirst.mockResolvedValue({
+    mockPrisma.user.findFirst.mockResolvedValue({
       id: 'talent-1',
       fullName: 'Alex Talent',
-      counterparties: [
+      accountType: 'talent',
+      talentCounterparties: [
         {
           id: 'cp-1',
           cybridCounterpartyGuid: 'cpguid-1',

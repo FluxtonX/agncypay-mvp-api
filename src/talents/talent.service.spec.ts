@@ -16,10 +16,8 @@ describe('TalentService', () => {
   beforeEach(async () => {
     prisma = {
       user: {
-        findUnique: jest.fn().mockResolvedValue({ id: 'agency_1', fullName: 'Agency One' }),
-      },
-      talent: {
         create: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue({ id: 'agency_1', fullName: 'Agency One' }),
         findMany: jest.fn(),
         findFirst: jest.fn(),
         update: jest.fn(),
@@ -69,11 +67,12 @@ describe('TalentService', () => {
   });
 
   it('should create a domestic talent and Cybrid counterparty', async () => {
-    prisma.talent.create.mockResolvedValue({
+    prisma.user.findUnique.mockResolvedValueOnce({ id: 'agency_1', fullName: 'Agency One' }).mockResolvedValueOnce(null);
+    prisma.user.create.mockResolvedValue({
       id: 'tal_1',
       agencyId: 'agency_1',
       fullName: 'John Doe',
-      isInternational: false,
+      accountType: 'talent',
     });
 
     prisma.cybridCounterparty.create.mockResolvedValue({
@@ -98,10 +97,11 @@ describe('TalentService', () => {
   });
 
   it('should link bank account for talent', async () => {
-    prisma.talent.findFirst.mockResolvedValue({
+    prisma.user.findFirst.mockResolvedValue({
       id: 'tal_1',
       agencyId: 'agency_1',
       fullName: 'John Doe',
+      talentCounterparties: [],
     });
 
     const res = await service.linkBankAccount('tal_1', 'agency_1', {
@@ -121,13 +121,13 @@ describe('TalentService', () => {
   });
 
   it('should enforce agency tenant isolation when querying talents', async () => {
-    prisma.talent.findMany.mockResolvedValue([{ id: 'tal_1', agencyId: 'agency_1' }]);
+    prisma.user.findMany.mockResolvedValue([{ id: 'tal_1', agencyId: 'agency_1', accountType: 'talent' }]);
 
     const list = await service.getTalents('agency_1');
     expect(list).toHaveLength(1);
-    expect(prisma.talent.findMany).toHaveBeenCalledWith(
+    expect(prisma.user.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { agencyId: 'agency_1', deletedAt: null },
+        where: { agencyId: 'agency_1', accountType: 'talent', deletedAt: null },
       }),
     );
   });

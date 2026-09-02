@@ -16,9 +16,9 @@ export class RegisterDto {
   @IsNotEmpty()
   fullName!: string;
 
-  @ApiProperty({ example: 'agency', enum: ['brand', 'agency'], description: 'Account user role type' })
-  @IsEnum(['brand', 'agency'])
-  accountType!: 'brand' | 'agency';
+  @ApiProperty({ example: 'talent', enum: ['brand', 'agency', 'talent'], description: 'Account user role type' })
+  @IsEnum(['brand', 'agency', 'talent'])
+  accountType!: 'brand' | 'agency' | 'talent';
 
   @ApiProperty({ example: 'Elite Workspace', required: false, description: 'Optional custom workspace name' })
   @IsString()

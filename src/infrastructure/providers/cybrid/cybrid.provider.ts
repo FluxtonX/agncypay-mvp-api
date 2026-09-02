@@ -34,6 +34,7 @@ import {
   CybridCustomerListResponse,
   CybridPatchCustomerRequest,
   CybridCreateCustomerRequest,
+  CybridCustomerName,
   CybridIdentityVerificationResponse,
   CybridCreateIdentityVerificationRequest,
   CybridAccountResponse,
@@ -77,9 +78,17 @@ export class CybridProvider implements IFinancialProvider {
   // ─── Customers ───────────────────────────────────────────────
 
   async createCustomer(params: CreateBusinessCustomerParams): Promise<CustomerResponse> {
+    let customerName: CybridCustomerName = { full: params.name };
+    if (params.type === 'individual') {
+      const parts = (params.name || 'Talent User').trim().split(/\s+/);
+      const first = parts[0] || 'Talent';
+      const last = parts.slice(1).join(' ') || first;
+      customerName = { first, last };
+    }
+
     const body: CybridCreateCustomerRequest = {
       type: params.type,
-      name: { full: params.name },
+      name: customerName,
     };
 
     if (params.email) {
