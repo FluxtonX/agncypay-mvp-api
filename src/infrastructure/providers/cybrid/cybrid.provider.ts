@@ -574,15 +574,21 @@ export class CybridProvider implements IFinancialProvider {
     }
 
     try {
+      const cleanSig = signature.replace(/^(sha256=|v1=)/i, '').trim();
+
       const computed = crypto
         .createHmac('sha256', this.config.webhookSecret)
-        .update(payload)
+        .update(payload, 'utf8')
         .digest('hex');
 
-      return crypto.timingSafeEqual(
-        Buffer.from(computed, 'hex'),
-        Buffer.from(signature, 'hex'),
-      );
+      const bufComputed = Buffer.from(computed, 'hex');
+      const bufSig = Buffer.from(cleanSig, 'hex');
+
+      if (bufComputed.length !== bufSig.length) {
+        return false;
+      }
+
+      return crypto.timingSafeEqual(bufComputed, bufSig);
     } catch (error) {
       this.logger.error(`Webhook signature verification failed: ${error}`);
       return false;

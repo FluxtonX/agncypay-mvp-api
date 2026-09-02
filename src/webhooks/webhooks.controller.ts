@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Headers, HttpCode, HttpStatus, UseGuards, ForbiddenException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Headers, Req, HttpCode, HttpStatus, UseGuards, ForbiddenException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { CybridWebhookService } from './cybrid-webhook.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -25,10 +25,12 @@ export class WebhooksController {
   @HttpCode(HttpStatus.OK)
   @Post('cybrid')
   async handleCybridWebhook(
+    @Req() req: any,
     @Body() payload: any,
     @Headers('x-cybrid-signature') signature?: string,
   ) {
-    return this.cybridWebhookService.processWebhookEvent(payload, signature);
+    const rawBody = req?.rawBody ? req.rawBody.toString('utf8') : undefined;
+    return this.cybridWebhookService.processWebhookEvent(payload, signature, rawBody);
   }
 
   @ApiOperation({ summary: 'Simulate Cybrid Webhook for Testing and Development (Sandbox Only, Authenticated)' })
