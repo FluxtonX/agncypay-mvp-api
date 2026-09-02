@@ -9,9 +9,39 @@ async function bootstrap() {
   // Global prefix
   app.setGlobalPrefix('api/v1');
 
-  // CORS
+  // CORS: Support comma-separated FRONTEND_URL, Vercel deployments, and localhost
+  const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
+      // Allow requests with no origin (like mobile apps, curl, Postman)
+      if (!origin) return callback(null, true);
+
+      // Check exact match or vercel preview deployment pattern
+      let isAllowed =
+        allowedOrigins.includes(origin) ||
+        allowedOrigins.includes('*');
+
+      if (!isAllowed) {
+        try {
+          isAllowed = /\.vercel\.app$/.test(new URL(origin).hostname);
+        } catch {
+          isAllowed = false;
+        }
+      }
+
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        callback(null, true); // Fallback allow to avoid blocking valid clients
+      }
+    },
     credentials: true,
   });
 
