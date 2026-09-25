@@ -6,12 +6,12 @@ import { CurrentUser } from '../common/decorators';
 
 @ApiTags('Invoices')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('invoices')
 export class InvoicesController {
   constructor(private readonly invoicesService: InvoicesService) {}
 
   @ApiOperation({ summary: 'List all invoices for authenticated user (Agency or Brand)' })
+  @UseGuards(JwtAuthGuard)
   @Get()
   async getInvoices(@CurrentUser('id') userId: string) {
     return this.invoicesService.getInvoices(userId);
@@ -24,6 +24,7 @@ export class InvoicesController {
   }
 
   @ApiOperation({ summary: 'Get single invoice by ID with tenant access check' })
+  @UseGuards(JwtAuthGuard)
   @Get(':id')
   async getInvoiceById(
     @Param('id') id: string,
@@ -33,6 +34,7 @@ export class InvoicesController {
   }
 
   @ApiOperation({ summary: 'Create new invoice draft or send' })
+  @UseGuards(JwtAuthGuard)
   @Post()
   async createInvoice(
     @CurrentUser('id') userId: string,
@@ -42,6 +44,7 @@ export class InvoicesController {
   }
 
   @ApiOperation({ summary: 'Update invoice status' })
+  @UseGuards(JwtAuthGuard)
   @Patch(':id/status')
   async updateInvoiceStatus(
     @Param('id') id: string,

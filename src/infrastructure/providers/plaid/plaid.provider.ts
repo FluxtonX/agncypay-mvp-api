@@ -45,13 +45,21 @@ export class PlaidProvider implements IBankVerificationProvider {
     const client = this.ensureClient();
 
     try {
-      const response = await client.linkTokenCreate({
+      const webhookUrl = this.configService.get<string>('PLAID_WEBHOOK_URL') || 'http://localhost:3001/api/v1/webhooks/plaid';
+      const linkParams: any = {
         user: { client_user_id: userId },
         client_name: 'AgncyPay',
         products: [Products.Auth],
         country_codes: [CountryCode.Us],
         language: 'en',
-      });
+      };
+
+      // Set webhook if defined
+      if (webhookUrl) {
+        linkParams.webhook = webhookUrl;
+      }
+
+      const response = await client.linkTokenCreate(linkParams);
 
       return {
         linkToken: response.data.link_token,
@@ -63,7 +71,7 @@ export class PlaidProvider implements IBankVerificationProvider {
     }
   }
 
-  async createSandboxPublicToken(institutionId = 'ins_109508'): Promise<string> {
+  async createSandboxPublicToken(institutionId = 'ins_3'): Promise<string> {
     const client = this.ensureClient();
     try {
       const response = await client.sandboxPublicTokenCreate({
@@ -88,13 +96,34 @@ export class PlaidProvider implements IBankVerificationProvider {
       const accessToken = exchangeResponse.data.access_token;
       const itemId = exchangeResponse.data.item_id;
 
+      let institutionName = 'Connected Bank';
+      try {
+        const itemRes = await client.itemGet({ access_token: accessToken });
+        const institutionId = itemRes.data.item.institution_id;
+        if (institutionId) {
+          const instRes = await client.institutionsGetById({
+            institution_id: institutionId,
+            country_codes: [CountryCode.Us],
+          });
+          institutionName = instRes.data.institution.name;
+        }
+      } catch (instErr: any) {
+        this.logger.warn(`Could not fetch institution name: ${instErr?.message}`);
+      }
+
       const authResponse = await client.authGet({ access_token: accessToken });
       const accounts: VerifiedBankAccount[] = authResponse.data.accounts.map((acc) => ({
         accountId: acc.account_id,
-        bankName: acc.name,
+        bankName: institutionName,
+        accountName: acc.name,
         accountNumberMask: acc.mask || 'XXXX',
         routingNumber: authResponse.data.numbers.ach[0]?.routing || '111000025',
         accountHolderName: acc.official_name || acc.name,
+        subtype: acc.subtype || 'checking',
+        type: acc.type || 'depository',
+        availableBalance: acc.balances.available ?? acc.balances.current ?? 0,
+        currentBalance: acc.balances.current ?? 0,
+        institutionName: institutionName,
       }));
 
       return { accessToken, itemId, accounts };

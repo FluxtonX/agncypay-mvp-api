@@ -11,9 +11,15 @@ export interface ExchangePublicTokenRequest {
 export interface VerifiedBankAccount {
   accountId: string;
   bankName: string;
+  accountName?: string;
   accountNumberMask: string;
   routingNumber: string;
   accountHolderName: string;
+  subtype?: string;
+  type?: string;
+  availableBalance?: number;
+  currentBalance?: number;
+  institutionName?: string;
 }
 
 export interface IBankVerificationProvider {

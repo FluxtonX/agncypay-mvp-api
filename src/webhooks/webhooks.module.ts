@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { WebhooksController } from './webhooks.controller';
 import { CybridWebhookService } from './cybrid-webhook.service';
+import { PlaidWebhookService } from './plaid-webhook.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { AuditLogsModule } from '../modules/audit-logs/audit-logs.module';
 import { LedgerModule } from '../modules/ledger/ledger.module';
@@ -20,9 +21,10 @@ import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
   controllers: [WebhooksController],
   providers: [
     CybridWebhookService,
+    PlaidWebhookService,
     CybridCustomerService,
     CybridAccountService,
   ],
-  exports: [CybridWebhookService],
+  exports: [CybridWebhookService, PlaidWebhookService],
 })
 export class WebhooksModule {}

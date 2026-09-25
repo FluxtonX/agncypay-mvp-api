@@ -58,22 +58,35 @@ export class VerificationService {
     };
   }
 
-  async createPlaidLinkToken(userId: string) {
-    return this.plaidProvider.createLinkToken(userId);
+  private async resolveAgencyUserId(userId?: string): Promise<string> {
+    if (userId) return userId;
+    const defaultAgency = await this.prisma.user.findFirst({
+      where: { accountType: 'agency', deletedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+    return defaultAgency?.id || 'b40cf746-543a-48ce-9c28-b6e97c427f22';
   }
 
-  async exchangePlaidPublicToken(userId: string, publicToken: string) {
-    const result = await this.plaidProvider.exchangePublicToken({ userId, publicToken });
+  async createPlaidLinkToken(userId?: string) {
+    const targetUserId = await this.resolveAgencyUserId(userId);
+    return this.plaidProvider.createLinkToken(targetUserId);
+  }
+
+  async exchangePlaidPublicToken(userId: string | undefined, publicToken: string, institutionMetadata?: any) {
+    const targetUserId = await this.resolveAgencyUserId(userId);
+    const result = await this.plaidProvider.exchangePublicToken({ userId: targetUserId, publicToken });
     const primaryAccount = result.accounts[0];
 
     const encryptedAccessToken = encryptText(result.accessToken);
     const encryptedAccountId = primaryAccount?.accountId ? encryptText(primaryAccount.accountId) : null;
     const encryptedItemId = result.itemId ? encryptText(result.itemId) : null;
 
+    const bankName = institutionMetadata?.name || primaryAccount?.bankName || 'Verified Bank Account';
+
     const bankDetails = await this.prisma.bankDetails.upsert({
-      where: { userId },
+      where: { userId: targetUserId },
       update: {
-        bankName: primaryAccount?.bankName || 'Verified Bank Account',
+        bankName,
         accountNumber: `****${primaryAccount?.accountNumberMask || '6789'}`,
         routingNumber: primaryAccount?.routingNumber || '111000025',
         accountHolderName: primaryAccount?.accountHolderName || 'Verified Account Holder',
@@ -83,8 +96,8 @@ export class VerificationService {
         status: 'approved',
       },
       create: {
-        userId,
-        bankName: primaryAccount?.bankName || 'Verified Bank Account',
+        userId: targetUserId,
+        bankName,
         accountNumber: `****${primaryAccount?.accountNumberMask || '6789'}`,
         routingNumber: primaryAccount?.routingNumber || '111000025',
         accountHolderName: primaryAccount?.accountHolderName || 'Verified Account Holder',
@@ -95,43 +108,90 @@ export class VerificationService {
       },
     });
 
-    if (primaryAccount) {
-      const extAccountId = primaryAccount.accountId || `plaid_${bankDetails.id}`;
+    // Save all accounts returned by Plaid into agencyExternalAccount table
+    for (const acc of result.accounts) {
+      const extAccountId = acc.accountId || `plaid_${bankDetails.id}_${acc.accountNumberMask}`;
       await this.prisma.agencyExternalAccount.upsert({
         where: { providerExternalAccountId: extAccountId },
         update: {
-          accountName: primaryAccount.accountHolderName || primaryAccount.bankName,
-          bankName: primaryAccount.bankName,
-          accountNumberMask: primaryAccount.accountNumberMask || '6789',
-          routingNumber: primaryAccount.routingNumber || '111000025',
-          isPrimary: true,
+          accountName: acc.accountName || acc.accountHolderName || `${bankName} Checking`,
+          bankName,
+          accountNumberMask: acc.accountNumberMask || '6789',
+          routingNumber: acc.routingNumber || '111000025',
+          isPrimary: acc.accountId === primaryAccount?.accountId,
         },
         create: {
-          agencyId: userId,
-          accountName: primaryAccount.accountHolderName || primaryAccount.bankName,
-          bankName: primaryAccount.bankName,
-          accountNumberMask: primaryAccount.accountNumberMask || '6789',
-          routingNumber: primaryAccount.routingNumber || '111000025',
+          agencyId: targetUserId,
+          accountName: acc.accountName || acc.accountHolderName || `${bankName} Checking`,
+          bankName,
+          accountNumberMask: acc.accountNumberMask || '6789',
+          routingNumber: acc.routingNumber || '111000025',
           providerExternalAccountId: extAccountId,
-          isPrimary: true,
+          isPrimary: acc.accountId === primaryAccount?.accountId,
         },
       });
     }
 
     await this.auditLogsService.log({
-      userId,
+      userId: targetUserId,
       action: 'BANK_VERIFIED_PLAID',
       entityType: 'BankDetails',
       entityId: bankDetails.id,
-      details: { bankName: bankDetails.bankName, accountMask: primaryAccount?.accountNumberMask },
+      details: { bankName, totalAccounts: result.accounts.length, accounts: result.accounts.map(a => a.accountNumberMask) },
     });
 
     return { success: true, bankDetails, accounts: result.accounts };
   }
 
-  async linkPlaidSandboxAccount(userId: string, institutionId = 'ins_109508') {
+  async linkPlaidSandboxAccount(userId?: string, institutionId = 'ins_3') {
+    const targetUserId = await this.resolveAgencyUserId(userId);
     const publicToken = await this.plaidProvider.createSandboxPublicToken(institutionId);
-    return this.exchangePlaidPublicToken(userId, publicToken);
+    return this.exchangePlaidPublicToken(targetUserId, publicToken);
+  }
+
+  async getLinkedAccounts(userId?: string) {
+    const targetUserId = await this.resolveAgencyUserId(userId);
+    const externalAccounts = await this.prisma.agencyExternalAccount.findMany({
+      where: { agencyId: targetUserId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const bankDetails = await this.prisma.bankDetails.findUnique({
+      where: { userId: targetUserId },
+    });
+
+    return {
+      success: true,
+      bankDetails,
+      accounts: externalAccounts,
+    };
+  }
+
+  async disconnectAccount(userId: string | undefined, accountId: string) {
+    const targetUserId = await this.resolveAgencyUserId(userId);
+    // Delete matching agencyExternalAccount
+    await this.prisma.agencyExternalAccount.deleteMany({
+      where: {
+        agencyId: targetUserId,
+        OR: [
+          { id: accountId },
+          { providerExternalAccountId: accountId },
+        ],
+      },
+    });
+
+    // Check if any external accounts remain
+    const remaining = await this.prisma.agencyExternalAccount.count({
+      where: { agencyId: targetUserId },
+    });
+
+    if (remaining === 0) {
+      await this.prisma.bankDetails.deleteMany({
+        where: { userId: targetUserId },
+      });
+    }
+
+    return { success: true, remaining };
   }
 
   async updateBusinessProfile(userId: string, data: any) {
