@@ -55,13 +55,13 @@ model User {
   agencyExternalAccounts AgencyExternalAccount[]
   payouts         Payout[]
 
-  // Cybrid relations
-  cybridCustomer     CybridCustomer?
-  agencyId           String?
-  agency             User?            @relation("AgencyTalents", fields: [agencyId], references: [id], onDelete: SetNull)
-  talentsManaged     User[]           @relation("AgencyTalents")
-  talentPayouts      PaymentPayout[]  @relation("TalentPayouts")
-  talentCounterparties CybridCounterparty[] @relation("TalentCounterparties")
+  // Conduit relations
+  conduitCustomer      ConduitCustomer?
+  agencyId             String?
+  agency               User?            @relation("AgencyTalents", fields: [agencyId], references: [id], onDelete: SetNull)
+  talentsManaged       User[]           @relation("AgencyTalents")
+  talentPayouts        PaymentPayout[]  @relation("TalentPayouts")
+  talentRecipients     ConduitRecipient[] @relation("TalentConduitRecipients")
   paymentsAsBrand    Payment[]        @relation("PaymentBrand")
   paymentsAsAgency   Payment[]        @relation("PaymentAgency")
   paymentPayouts     PaymentPayout[]  @relation("PayoutAgency")
@@ -646,102 +646,80 @@ model QuickBooksInvoice {
   @@map("quickbooks_invoices")
 }
 
-// ─────────────────────────── CYBRID INTEGRATION ───────────────────────────
+// ─────────────────────────── CONDUIT INTEGRATION ───────────────────────────
 
-model CybridCustomer {
+model ConduitCustomer {
   id                    String    @id @default(uuid())
   userId                String    @unique
   user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  cybridCustomerGuid    String    @unique
-  customerType          String    @default("business")
-  kybStatus             String    @default("not_started")
-  kybVerificationGuid   String?
-  kybOutcome            String?
-  cybridBankGuid        String?
+  conduitCustomerId     String    @unique
+  customerType          String    @default("business") // "business" | "individual"
+  status                String    @default("pending")  // "pending" | "active" | "suspended"
+  kybStatus             String    @default("not_started") // "not_started" | "pending" | "approved" | "rejected"
+  applicationId         String?
+  country               String?   @default("USA")
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
-  accounts              CybridAccount[]
-  counterparties        CybridCounterparty[]
+  virtualAccounts       ConduitVirtualAccount[]
+  wallets               ConduitWallet[]
+  recipients            ConduitRecipient[]
 
-  @@map("cybrid_customers")
+  @@map("conduit_customers")
 }
 
-model CybridAccount {
+model ConduitVirtualAccount {
   id                    String    @id @default(uuid())
-  cybridCustomerId      String
-  cybridCustomer        CybridCustomer @relation(fields: [cybridCustomerId], references: [id], onDelete: Cascade)
-  cybridAccountGuid     String    @unique
-  accountType           String    // 'fiat', 'trading'
-  asset                 String    // 'USD', 'USDC'
-  name                  String?
-  status                String    @default("created")
+  conduitCustomerId     String
+  conduitCustomer       ConduitCustomer @relation(fields: [conduitCustomerId], references: [id], onDelete: Cascade)
+  virtualAccountId      String    @unique
+  currency              String    @default("USD")
+  accountNumber         String?
+  routingNumber         String?
+  bankName              String?
+  beneficiaryName       String?
+  status                String    @default("active")
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
-  depositBankAccounts   CybridDepositBankAccount[]
-
-  @@index([cybridCustomerId, accountType, asset])
-  @@map("cybrid_accounts")
+  @@index([conduitCustomerId])
+  @@map("conduit_virtual_accounts")
 }
 
-model CybridDepositBankAccount {
-  id                       String    @id @default(uuid())
-  cybridAccountId          String
-  cybridAccount            CybridAccount @relation(fields: [cybridAccountId], references: [id], onDelete: Cascade)
-  cybridDepositBankGuid    String    @unique
-  uniqueMemoId             String?
-  routingNumberType        String?
-  routingNumber            String?
-  accountNumber            String?
-  bankName                 String?
-  label                    String?
-  depositType              String?
-  status                   String    @default("created")
-  createdAt                DateTime  @default(now())
-  updatedAt                DateTime  @updatedAt
+model ConduitWallet {
+  id                    String    @id @default(uuid())
+  conduitCustomerId     String
+  conduitCustomer       ConduitCustomer @relation(fields: [conduitCustomerId], references: [id], onDelete: Cascade)
+  walletId              String    @unique
+  chain                 String    // e.g. "base", "polygon", "ethereum", "solana"
+  address               String
+  status                String    @default("active")
+  isNonCustodial        Boolean   @default(true)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
-  @@index([cybridAccountId])
-  @@map("cybrid_deposit_bank_accounts")
+  @@index([conduitCustomerId, chain])
+  @@map("conduit_wallets")
 }
 
-model CybridCounterparty {
-  id                       String    @id @default(uuid())
-  cybridCustomerId         String
-  cybridCustomer           CybridCustomer @relation(fields: [cybridCustomerId], references: [id], onDelete: Cascade)
-  cybridCounterpartyGuid   String    @unique
-  name                     String
-  counterpartyType         String    @default("individual")
-  talentId                 String?
-  talent                   User?     @relation("TalentCounterparties", fields: [talentId], references: [id])
-  status                   String    @default("storing")
-  createdAt                DateTime  @default(now())
-  updatedAt                DateTime  @updatedAt
+model ConduitRecipient {
+  id                    String    @id @default(uuid())
+  conduitCustomerId     String
+  conduitCustomer       ConduitCustomer @relation(fields: [conduitCustomerId], references: [id], onDelete: Cascade)
+  recipientId           String    @unique
+  name                  String
+  recipientType         String    @default("individual") // "individual" | "business"
+  talentId              String?
+  talent                User?     @relation("TalentConduitRecipients", fields: [talentId], references: [id])
+  status                String    @default("active")
+  payoutRail            String?   @default("ach")
+  accountNumberMask     String?
+  routingNumber         String?
+  walletAddress         String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
-  externalBankAccounts     CybridExternalBankAccount[]
-
-  @@map("cybrid_counterparties")
-}
-
-model CybridExternalBankAccount {
-  id                          String    @id @default(uuid())
-  cybridCounterpartyId        String?
-  cybridCounterparty          CybridCounterparty? @relation(fields: [cybridCounterpartyId], references: [id])
-  cybridExternalBankGuid      String    @unique
-  customerGuid                String?
-  asset                       String    @default("USD")
-  accountKind                 String?   // 'plaid', 'plaid_processor_token', 'raw_routing_details'
-  bankName                    String?
-  mask                        String?
-  plaidInstitutionId          String?
-  status                      String    @default("storing")
-  failureCode                 String?
-  // For agency own external accounts
-  agencyUserId                String?
-  createdAt                   DateTime  @default(now())
-  updatedAt                   DateTime  @updatedAt
-
-  @@map("cybrid_external_bank_accounts")
+  @@map("conduit_recipients")
 }
 
 // ─────────────────────────── PAYMENT (Brand → Agency) ───────────────────────────
@@ -759,9 +737,9 @@ model Payment {
   status              String    @default("CREATED")
   paymentMethod       String    @default("ach")
 
-  // Cybrid references
-  cybridTransferGuid  String?
-  cybridDepositRef    String?
+  // Conduit references
+  conduitPaymentId    String?
+  conduitDepositRef   String?
 
   fundedAt            DateTime?
   completedAt         DateTime?
@@ -778,7 +756,7 @@ model Payment {
 
   @@index([agencyId, status])
   @@index([brandId, status])
-  @@index([cybridTransferGuid])
+  @@index([conduitPaymentId])
   @@map("payments")
 }
 
@@ -798,12 +776,10 @@ model PaymentPayout {
   payoutType             String    @default("domestic")   // domestic, international, agency_withdrawal
   status                 String    @default("CREATED")
 
-  // Cybrid references
-  cybridQuoteGuid        String?
-  cybridTransferGuid     String?
-  cybridTradeGuid        String?
-  cybridPlanGuid         String?
-  cybridExecutionGuid    String?
+  // Conduit references
+  conduitPayoutId        String?
+  conduitOrderId         String?
+  conduitQuoteId         String?
   destinationAccountGuid String?
 
   // Failure tracking
@@ -827,8 +803,8 @@ model PaymentPayout {
 
   @@index([agencyId, status])
   @@index([talentId])
-  @@index([cybridTransferGuid])
-  @@index([cybridTradeGuid])
+  @@index([conduitPayoutId])
+  @@index([conduitOrderId])
   @@map("payment_payouts")
 }
 
@@ -836,7 +812,7 @@ model PaymentPayout {
 
 model ProviderOperation {
   id                  String    @id @default(uuid())
-  provider            String    @default("cybrid")
+  provider            String    @default("conduit")
   operationType       String    // 'transfer', 'trade', 'quote', 'plan', 'execution', 'kyb_verification'
   operationGuid       String
   paymentId           String?
@@ -897,11 +873,11 @@ model ReconciliationRecord {
   reconciliationType  String    // 'balance', 'transfer', 'trade'
   entityType          String    // 'payment', 'payout'
   entityId            String?
-  cybridState         String?
+  providerState       String?
   internalState       String?
-  cybridAmount        Decimal?  @db.Decimal(18, 4)
+  providerAmount      Decimal?  @db.Decimal(18, 4)
   internalAmount      Decimal?  @db.Decimal(18, 4)
-  discrepancyType     String?   // 'status_mismatch', 'amount_mismatch', 'missing_internal', 'missing_cybrid'
+  discrepancyType     String?   // 'status_mismatch', 'amount_mismatch', 'missing_internal', 'missing_provider'
   resolution          String?   @default("unresolved")
   resolvedAt          DateTime?
   resolvedBy          String?

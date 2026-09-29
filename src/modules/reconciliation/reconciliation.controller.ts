@@ -11,7 +11,7 @@ import { CurrentUser } from '../../common/decorators';
 export class ReconciliationController {
   constructor(private readonly reconciliationService: ReconciliationService) {}
 
-  @ApiOperation({ summary: 'Trigger safety reconciliation run between Cybrid and AgncyPay' })
+  @ApiOperation({ summary: 'Trigger safety reconciliation run between Conduit and AgncyPay' })
   @Post('run')
   async triggerReconciliation() {
     return this.reconciliationService.runReconciliation();

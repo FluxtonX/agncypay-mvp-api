@@ -36,7 +36,7 @@ export class TreasuryService {
     // Debit: Clearing account (inbound funds received)
     // Credit: Brand Prepaid liability account (available for brand to spend)
     const journalEntry = await this.ledgerService.postJournalEntry({
-      debitAccountCode: 'CLEARING:CYBRID_DEPOSIT:USD',
+      debitAccountCode: 'CLEARING:CONDUIT_DEPOSIT:USD',
       creditAccountCode: `BRAND:${userId}:PREPAID`,
       amount: decAmount,
       currency: 'USD',

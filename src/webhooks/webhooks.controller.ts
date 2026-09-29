@@ -1,15 +1,14 @@
-import { Controller, Get, Post, Body, Headers, Req, HttpCode, HttpStatus, UseGuards, ForbiddenException } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
-import { CybridWebhookService } from './cybrid-webhook.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { ConfigService } from '@nestjs/config';
+import { Controller, Get, Post, Body, Headers, Query, Req, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { PlaidWebhookService } from './plaid-webhook.service';
+import { ConduitWebhookService } from './conduit-webhook.service';
 
 @ApiTags('Webhooks')
 @Controller('webhooks')
 export class WebhooksController {
   constructor(
-    private readonly cybridWebhookService: CybridWebhookService,
-    private readonly configService: ConfigService,
+    private readonly plaidWebhookService: PlaidWebhookService,
+    private readonly conduitWebhookService: ConduitWebhookService,
   ) {}
 
   @ApiOperation({ summary: 'Webhook endpoint health check' })
@@ -17,34 +16,62 @@ export class WebhooksController {
   @HttpCode(HttpStatus.OK)
   @Get('health')
   async healthCheck() {
-    return { status: 'online', service: 'AgncyPay Webhook Listener' };
+    return { status: 'online', service: 'AgncyPay Webhook Listener', plaid: 'active' };
   }
 
-  @ApiOperation({ summary: 'Cybrid Webhook ingestion endpoint' })
-  @ApiResponse({ status: 200, description: 'Webhook processed' })
+  // ─── PLAID WEBHOOKS ────────────────────────────────────────────
+
+  @ApiOperation({ summary: 'Plaid Webhook ingestion endpoint (Bank Updates, Auth, Balances)' })
+  @ApiResponse({ status: 200, description: 'Plaid webhook processed' })
   @HttpCode(HttpStatus.OK)
-  @Post('cybrid')
-  async handleCybridWebhook(
-    @Req() req: any,
+  @Post('plaid')
+  async handlePlaidWebhook(
     @Body() payload: any,
-    @Headers('x-cybrid-signature') signature?: string,
+    @Headers('plaid-verification') verificationHeader?: string,
   ) {
-    const rawBody = req?.rawBody ? req.rawBody.toString('utf8') : undefined;
-    return this.cybridWebhookService.processWebhookEvent(payload, signature, rawBody);
+    return this.plaidWebhookService.processWebhook(payload, verificationHeader);
   }
 
-  @ApiOperation({ summary: 'Simulate Cybrid Webhook for Testing and Development (Sandbox Only, Authenticated)' })
-  @ApiResponse({ status: 200, description: 'Simulated event processed' })
-  @ApiResponse({ status: 403, description: 'Forbidden in production' })
-  @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Simulate or fire a Plaid Webhook event (Sandbox Testing)' })
+  @ApiResponse({ status: 200, description: 'Simulated Plaid event processed' })
   @HttpCode(HttpStatus.OK)
-  @Post('cybrid/simulate')
-  async simulateCybridWebhook(@Body() payload: any) {
-    const env = this.configService.get<string>('CYBRID_ENVIRONMENT', 'sandbox');
-    if (env === 'production') {
-      throw new ForbiddenException('Webhook simulation is disabled in production');
-    }
-    return this.cybridWebhookService.processWebhookEvent(payload);
+  @Post('plaid/simulate')
+  async simulatePlaidWebhook(
+    @Body()
+    body: {
+      webhook_type?: string;
+      webhook_code?: string;
+      item_id?: string;
+      error?: any;
+      new_transactions?: number;
+    },
+  ) {
+    const payload = {
+      webhook_type: body.webhook_type || 'ITEM',
+      webhook_code: body.webhook_code || 'DEFAULT_UPDATE',
+      item_id: body.item_id || 'sandbox_item_simulated',
+      error: body.error || null,
+      new_transactions: body.new_transactions ?? 5,
+    };
+    return this.plaidWebhookService.processWebhook(payload);
+  }
+
+  @ApiOperation({ summary: 'Get list of recent Plaid webhook events received' })
+  @ApiResponse({ status: 200, description: 'List of Plaid webhook events' })
+  @Get('plaid/events')
+  async getPlaidWebhookEvents(@Query('limit') limit?: string) {
+    const parsedLimit = limit ? parseInt(limit, 10) : 25;
+    return this.plaidWebhookService.getRecentEvents(parsedLimit);
+  }
+
+  @ApiOperation({ summary: 'Conduit Financial live webhook handler' })
+  @ApiResponse({ status: 200, description: 'Conduit webhook processed' })
+  @Post('conduit')
+  async handleConduitWebhook(
+    @Headers('x-conduit-signature') signature: string,
+    @Body() body: any,
+    @Req() req: any,
+  ) {
+    return this.conduitWebhookService.processWebhook(signature, body, req.rawBody);
   }
 }

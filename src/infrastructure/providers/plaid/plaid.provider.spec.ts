@@ -56,7 +56,7 @@ describe('PlaidProvider', () => {
       }),
       processorTokenCreate: jest.fn().mockResolvedValue({
         data: {
-          processor_token: 'processor-token-cybrid-123',
+          processor_token: 'processor-token-conduit-123',
         },
       }),
     };
@@ -82,9 +82,9 @@ describe('PlaidProvider', () => {
   });
 
   it('should create processor token for payment processor', async () => {
-    const token = await provider.createProcessorToken('access-sandbox-simulated-user-123', 'acc-123', 'cybrid');
+    const token = await provider.createProcessorToken('access-sandbox-simulated-user-123', 'acc-123', 'conduit');
     expect(token).toBeDefined();
-    expect(token).toBe('processor-token-cybrid-123');
+    expect(token).toBe('processor-token-conduit-123');
   });
 });
 

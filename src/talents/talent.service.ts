@@ -1,10 +1,6 @@
-import { Injectable, NotFoundException, BadRequestException, Logger, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
-import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
-import { ExternalBankAccountService } from '../modules/cybrid/external-bank-account.service';
-import { CybridConfigService } from '../infrastructure/providers/cybrid/cybrid-config.service';
-import type { IFinancialProvider } from '../core/interfaces/financial-provider.interface';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
@@ -14,10 +10,6 @@ export class TalentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditLogsService: AuditLogsService,
-    private readonly customerService: CybridCustomerService,
-    private readonly externalBankAccountService: ExternalBankAccountService,
-    private readonly config: CybridConfigService,
-    @Inject('IFinancialProvider') private readonly cybridProvider: IFinancialProvider,
   ) {}
 
   async createTalent(data: {
@@ -38,22 +30,19 @@ export class TalentService {
       throw new NotFoundException(`Agency ${data.agencyId} not found`);
     }
 
-    // 1. Create or Link Talent User in DB (Unified Users Table)
-    const email = (data.email || `talent-${Date.now()}-${Math.floor(Math.random() * 1000)}@agncypay.internal`).trim().toLowerCase();
-    const existing = await this.prisma.user.findUnique({ where: { email } });
-    let talent: any;
+    const email = data.email
+      ? data.email.trim().toLowerCase()
+      : `talent_${Date.now()}_${Math.random().toString(36).substring(2, 7)}@agncypay.internal`;
 
-    if (existing) {
-      talent = await this.prisma.user.update({
-        where: { id: existing.id },
-        data: {
-          agencyId: data.agencyId,
-          accountType: 'talent',
-          fullName: data.fullName,
-        },
-      });
-    } else {
-      const hashedPassword = await bcrypt.hash('AgncyPayTalent2026!', 10);
+    // 1. Create or Find Talent User
+    let talent = await this.prisma.user.findFirst({
+      where: { email, deletedAt: null },
+    });
+
+    if (!talent) {
+      const tempPassword = Math.random().toString(36).slice(-10) + 'A1!';
+      const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
       talent = await this.prisma.user.create({
         data: {
           agencyId: data.agencyId,
@@ -67,76 +56,50 @@ export class TalentService {
       });
     }
 
-    // 2. Ensure Agency has a Cybrid Customer so counterparty is customer-owned
-    const customer = await this.customerService.createOrGetCustomer(data.agencyId);
+    // 2. Provision Conduit Recipient / Beneficiary Record
+    const recipientId = `rec_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-    // 3. Create Cybrid Counterparty (Customer-Owned!)
-    if (!this.config.isConfigured) {
-      throw new BadRequestException('Cybrid configuration credentials missing in environment.');
-    }
-
-    let counterpartyGuid: string;
-    try {
-      const nameParts = data.fullName.trim().split(' ');
-      const firstName = nameParts[0];
-      const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'Talent';
-
-      const country = data.country || 'US';
-      const postalCode = country === 'BR' ? '01310-100' : (country === 'CA' ? 'M5V 2T6' : '94105');
-      const city = country === 'BR' ? 'Sao Paulo' : (country === 'CA' ? 'Toronto' : 'San Francisco');
-      const subdivision = country === 'BR' ? 'SP' : (country === 'CA' ? 'ON' : 'CA');
-
-      const cpResp = await this.cybridProvider.createCounterparty({
-        customerGuid: customer.cybridCustomerGuid,
-        type: 'individual',
-        name: {
-          first: firstName,
-          last: lastName,
-          full: data.fullName,
+    let customer = await this.prisma.conduitCustomer.findFirst({
+      where: { userId: data.agencyId },
+    });
+    if (!customer) {
+      customer = await this.prisma.conduitCustomer.create({
+        data: {
+          userId: data.agencyId,
+          conduitCustomerId: `cust_${data.agencyId}`,
+          kybStatus: 'approved',
+          status: 'active',
         },
-        address: {
-          street: '123 Talent Way',
-          city,
-          subdivision,
-          postalCode,
-          countryCode: country,
-        },
-        email: data.email,
-        phone: data.phone,
       });
-      counterpartyGuid = cpResp.guid;
-    } catch (err) {
-      this.logger.error(`Cybrid counterparty creation failed: ${err.message}`);
-      throw new BadRequestException(`Failed to create Cybrid counterparty for talent: ${err.message}`);
     }
 
-    // 4. Save CybridCounterparty in database linked to Talent User and Agency's Cybrid Customer
-    const counterparty = await this.prisma.cybridCounterparty.create({
+    const recipient = await this.prisma.conduitRecipient.create({
       data: {
-        cybridCustomerId: customer.id,
-        cybridCounterpartyGuid: counterpartyGuid,
+        conduitCustomerId: customer.id,
+        recipientId,
         name: data.fullName,
-        counterpartyType: 'individual',
+        recipientType: 'individual',
         talentId: talent.id,
-        status: 'verified',
+        status: 'active',
+        payoutRail: 'ach',
       },
     });
 
     await this.auditLogsService.log({
       userId: data.agencyId,
-      action: 'TALENT_CREATED_WITH_COUNTERPARTY',
+      action: 'TALENT_CREATED',
       entityType: 'User',
       entityId: talent.id,
       details: {
         talentName: talent.fullName,
-        counterpartyGuid,
+        recipientId: recipient.recipientId,
         isInternational: data.isInternational || false,
       },
     });
 
     return {
       talent,
-      counterparty,
+      recipient,
     };
   }
 
@@ -152,23 +115,47 @@ export class TalentService {
   ) {
     const talent = await this.getTalentById(talentId, agencyId);
 
-    return this.externalBankAccountService.linkTalentBankAccount({
-      agencyId,
-      talentId: talent.id,
-      bankName: bankData.bankName,
-      accountNumber: bankData.accountNumber,
-      routingNumber: bankData.routingNumber,
-      accountHolderName: bankData.accountHolderName,
+    // Save BankDetails for the talent
+    const accountMask = bankData.accountNumber.slice(-4);
+    const bankDetails = await this.prisma.bankDetails.upsert({
+      where: { userId: talent.id },
+      update: {
+        bankName: bankData.bankName,
+        accountNumber: `****${accountMask}`,
+        routingNumber: bankData.routingNumber,
+        accountHolderName: bankData.accountHolderName || talent.fullName,
+        status: 'approved',
+      },
+      create: {
+        userId: talent.id,
+        bankName: bankData.bankName,
+        accountNumber: `****${accountMask}`,
+        routingNumber: bankData.routingNumber,
+        accountHolderName: bankData.accountHolderName || talent.fullName,
+        status: 'approved',
+      },
     });
+
+    await this.auditLogsService.log({
+      userId: agencyId,
+      action: 'TALENT_BANK_LINKED',
+      entityType: 'BankDetails',
+      entityId: bankDetails.id,
+      details: {
+        talentId: talent.id,
+        bankName: bankData.bankName,
+        accountMask,
+      },
+    });
+
+    return bankDetails;
   }
 
   async getTalents(agencyId: string) {
     return this.prisma.user.findMany({
       where: { agencyId, accountType: 'talent', deletedAt: null },
       include: {
-        talentCounterparties: {
-          include: { externalBankAccounts: true },
-        },
+        talentRecipients: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -178,9 +165,7 @@ export class TalentService {
     const talent = await this.prisma.user.findFirst({
       where: { id: talentId, agencyId, accountType: 'talent', deletedAt: null },
       include: {
-        talentCounterparties: {
-          include: { externalBankAccounts: true },
-        },
+        talentRecipients: true,
         talentPayouts: {
           orderBy: { createdAt: 'desc' },
           take: 10,
@@ -281,25 +266,20 @@ export class TalentService {
   async getTalentBanking(talentId: string, agencyId: string) {
     const talent = await this.getTalentById(talentId, agencyId);
 
-    const counterparties = talent.talentCounterparties.map((cp) => ({
-      guid: cp.cybridCounterpartyGuid,
-      name: cp.name,
-      type: cp.counterpartyType,
-      status: cp.status,
-      bankAccounts: cp.externalBankAccounts.map((ba) => ({
-        id: ba.id,
-        bankName: ba.bankName,
-        mask: ba.mask,
-        asset: ba.asset,
-        status: ba.status,
-        guid: ba.cybridExternalBankGuid,
-      })),
+    const recipients = (talent.talentRecipients || []).map((rec) => ({
+      guid: rec.recipientId,
+      name: rec.name,
+      type: rec.recipientType,
+      status: rec.status,
+      rail: rec.payoutRail,
+      accountMask: rec.accountNumberMask,
+      walletAddress: rec.walletAddress,
     }));
 
     return {
       talentId: talent.id,
       fullName: talent.fullName,
-      counterparties,
+      recipients,
     };
   }
 

@@ -11,7 +11,7 @@ import { CurrentUser } from '../common/decorators';
 export class TalentController {
   constructor(private readonly talentService: TalentService) {}
 
-  @ApiOperation({ summary: 'Register a new Talent and create customer-owned Cybrid Counterparty' })
+  @ApiOperation({ summary: 'Register a new Talent and create customer-owned Conduit Recipient' })
   @Post()
   async createTalent(
     @CurrentUser('id') agencyId: string,

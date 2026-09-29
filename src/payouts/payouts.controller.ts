@@ -11,7 +11,7 @@ import { CurrentUser } from '../common/decorators';
 export class PayoutsController {
   constructor(private readonly payoutsService: PayoutsService) {}
 
-  @ApiOperation({ summary: 'Request Domestic Talent Payout via Cybrid transfer' })
+  @ApiOperation({ summary: 'Request Domestic Talent Payout via Conduit transfer' })
   @ApiHeader({ name: 'Idempotency-Key', required: false, description: 'Unique idempotency key' })
   @Post('talent/domestic')
   async requestDomesticTalentPayout(

@@ -79,9 +79,8 @@ export class LedgerService {
 
     const classification = this.getAccountClassification(params.accountCode);
     const parts = params.accountCode.split(':');
-    const derivedOwnerId = parts.length >= 2 && parts[1] !== 'CYBRID_DEPOSIT' && parts[1] !== 'CYBRID_OUTBOUND' && parts[1] !== 'FEE'
-      ? parts[1]
-      : undefined;
+    const isClearingAccount = parts[0] === 'CLEARING' || parts[1] === 'FEE' || parts[1] === 'INBOUND_DEPOSIT' || parts[1] === 'OUTBOUND_PAYOUT' || parts[1] === 'OUTBOUND_CLEARING';
+    const derivedOwnerId = parts.length >= 2 && !isClearingAccount ? parts[1] : undefined;
 
     return this.prisma.ledgerAccount.create({
       data: {

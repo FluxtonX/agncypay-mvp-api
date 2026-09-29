@@ -4,17 +4,14 @@ import { VerificationService } from './verification.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
 import { AuditLogsModule } from '../modules/audit-logs/audit-logs.module';
-import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
-import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
+import { ConduitModule } from '../infrastructure/providers/conduit/conduit.module';
 
 @Module({
-  imports: [PrismaModule, AuditLogsModule],
+  imports: [PrismaModule, AuditLogsModule, ConduitModule],
   controllers: [VerificationController],
   providers: [
     VerificationService,
     PlaidProvider,
-    CybridCustomerService,
-    CybridAccountService,
   ],
   exports: [VerificationService],
 })

@@ -1,4 +1,4 @@
-import { Controller, Post, Body, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { RegisterDto, LoginDto, ForgotPasswordDto, ResetPasswordDto } from './dto';
@@ -21,6 +21,22 @@ export class AuthController {
   @Post('login')
   async login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get current user session & profile' })
+  @UseGuards(JwtAuthGuard)
+  @Post('me')
+  async getMePost(@CurrentUser('id') userId: string) {
+    return this.authService.getMe(userId);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get current user session & profile' })
+  @UseGuards(JwtAuthGuard)
+  @Get('me')
+  async getMe(@CurrentUser('id') userId: string) {
+    return this.authService.getMe(userId);
   }
 
   @ApiOperation({ summary: 'Request password reset email & token' })

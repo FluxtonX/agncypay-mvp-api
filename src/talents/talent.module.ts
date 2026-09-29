@@ -5,21 +5,17 @@ import { TalentBankAccountsService } from './talent-bank-accounts.service';
 import { TalentBankAccountsController } from './talent-bank-accounts.controller';
 import { PrismaModule } from '../prisma/prisma.module';
 import { AuditLogsModule } from '../modules/audit-logs/audit-logs.module';
-import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
-import { ExternalBankAccountService } from '../modules/cybrid/external-bank-account.service';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
+import { ConduitModule } from '../infrastructure/providers/conduit/conduit.module';
 
 @Module({
-  imports: [PrismaModule, AuditLogsModule],
+  imports: [PrismaModule, AuditLogsModule, ConduitModule],
   controllers: [TalentController, TalentBankAccountsController],
   providers: [
     TalentService,
     TalentBankAccountsService,
-    CybridCustomerService,
-    ExternalBankAccountService,
     PlaidProvider,
   ],
-  exports: [TalentService, TalentBankAccountsService, ExternalBankAccountService],
+  exports: [TalentService, TalentBankAccountsService],
 })
 export class TalentModule {}
-
