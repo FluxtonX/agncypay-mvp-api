@@ -30,22 +30,41 @@ export class QuickBooksOAuthService {
     }
   }
 
-  getAuthUrl(agencyId: string): string {
+  getAuthUrl(agencyId: string, returnTo = '/branddashboard'): string {
     if (!this.oauthClient) {
       const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
-      return `${frontendUrl}/agencydashboard/invoices?qb_connected=true&simulated=true`;
+      return `${frontendUrl}${returnTo}?qb_connected=true&simulated=true`;
     }
+
+    // State encodes user/agency identifier and return path
+    const safeState = Buffer.from(JSON.stringify({ agencyId, returnTo })).toString('base64url');
 
     return this.oauthClient.authorizeUri({
       scope: [OAuthClient.scopes.Accounting, OAuthClient.scopes.OpenId],
-      state: `agency_${agencyId}`,
+      state: safeState,
     });
   }
 
-  async handleCallback(code: string, realmId: string, state: string): Promise<string> {
-    const agencyId = state ? state.replace('agency_', '') : '';
+  async handleCallback(code: string, realmId: string, state: string, rawUrl?: string): Promise<string> {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+    let agencyId = '';
+    let returnTo = '/branddashboard';
 
-    if (!this.oauthClient || !agencyId) {
+    if (state) {
+      try {
+        if (state.startsWith('agency_')) {
+          agencyId = state.replace('agency_', '');
+        } else {
+          const parsed = JSON.parse(Buffer.from(state, 'base64url').toString('utf-8'));
+          agencyId = parsed.agencyId || '';
+          returnTo = parsed.returnTo || '/branddashboard';
+        }
+      } catch {
+        agencyId = state;
+      }
+    }
+
+    if (!this.oauthClient || !code) {
       if (agencyId) {
         await this.connectionRepo.upsertConnection({
           agencyId,
@@ -56,11 +75,13 @@ export class QuickBooksOAuthService {
           status: QuickBooksConnectStatus.connected,
         });
       }
-      return `${this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000'}/agencydashboard/invoices?qb_connected=true`;
+      return `${frontendUrl}${returnTo}?qb_connected=true`;
     }
 
     try {
-      const authResponse = await this.oauthClient.createToken(code);
+      // intuit-oauth expects the full callback URI or query string (e.g. ?code=...&realmId=...&state=...)
+      const exchangeUri = rawUrl || `?code=${encodeURIComponent(code)}&realmId=${encodeURIComponent(realmId || '')}&state=${encodeURIComponent(state || '')}`;
+      const authResponse = await this.oauthClient.createToken(exchangeUri);
       const token = authResponse.getJson();
 
       const accessToken = token.access_token;
@@ -69,7 +90,7 @@ export class QuickBooksOAuthService {
       const tokenExpiry = new Date(Date.now() + expiresIn * 1000);
 
       await this.connectionRepo.upsertConnection({
-        agencyId,
+        agencyId: agencyId || 'default-brand',
         realmId,
         accessToken,
         refreshToken,
@@ -77,13 +98,18 @@ export class QuickBooksOAuthService {
         status: QuickBooksConnectStatus.connected,
       });
 
-      return `${this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000'}/agencydashboard/invoices?qb_connected=true`;
+      return `${frontendUrl}${returnTo}?qb_connected=true`;
     } catch (err: any) {
       this.logger.error(`QuickBooks OAuth token exchange error: ${err.message}`);
       if (agencyId) {
-        await this.connectionRepo.updateStatus(agencyId, QuickBooksConnectStatus.sync_failed, err.message);
+        try {
+          await this.connectionRepo.updateStatus(agencyId, QuickBooksConnectStatus.sync_failed, err.message);
+        } catch (_) {}
       }
-      return `${this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000'}/agencydashboard/invoices?qb_error=${encodeURIComponent(err.message)}`;
+      const friendlyError = err.message?.includes('redirect_uri')
+        ? 'Redirect URI mismatch with Intuit Developer Portal'
+        : (err.message || 'Authorization failed');
+      return `${frontendUrl}${returnTo}?qb_error=${encodeURIComponent(friendlyError)}`;
     }
   }
 
@@ -119,7 +145,7 @@ export class QuickBooksOAuthService {
           status: QuickBooksConnectStatus.connected,
         });
 
-        return { accessToken: updated.accessToken, realmId: conn.realmId };
+        return { accessToken: updated?.accessToken || newAccessToken, realmId: conn.realmId };
       } catch (err: any) {
         this.logger.error(`Failed to refresh QuickBooks token: ${err.message}`);
         await this.connectionRepo.updateStatus(agencyId, QuickBooksConnectStatus.reconnect_required, err.message);

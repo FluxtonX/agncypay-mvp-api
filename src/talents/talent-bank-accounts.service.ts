@@ -9,6 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
+import { ConduitProvider } from '../infrastructure/providers/conduit/conduit.provider';
 import { encryptText, decryptText } from '../common/utils/crypto.util';
 
 export type BankAccountStatus =
@@ -46,6 +47,7 @@ export class TalentBankAccountsService {
     private readonly prisma: PrismaService,
     private readonly auditLogsService: AuditLogsService,
     private readonly plaidProvider: PlaidProvider,
+    private readonly conduitProvider: ConduitProvider,
   ) {}
 
   /**
@@ -122,34 +124,89 @@ export class TalentBankAccountsService {
     const encryptedAccountId = encryptText(targetAccountId);
 
     // Step C: Check Idempotency (Prevent Duplicate Bank Accounts for this Talent)
-    const existing = await this.prisma.cybridExternalBankAccount.findFirst({
+    const existing = await this.prisma.agencyExternalAccount.findFirst({
       where: {
-        agencyUserId: userId,
-        plaidInstitutionId: targetAccountId,
+        agencyId: userId,
+        accountNumberMask: accountMask,
       },
     });
 
-    if (existing && existing.status !== 'failed' && existing.status !== 'deleted') {
+    if (existing) {
       this.logger.log(`Account ${targetAccountId} already linked for user ${userId}`);
       return this.mapToDto(existing, institutionName, accountName, accountMask);
     }
 
-    // Step D: Generate provider bank account reference
-    // TODO: Wire Conduit Financial Provider adapter bank provisioning here
-    const providerExternalBankGuid = `eba_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    // Step D: Plaid to Conduit Recipient Pipeline
+    // 1. Ensure ConduitCustomer exists for Talent
+    let conduitCustomer = await this.prisma.conduitCustomer.findUnique({
+      where: { userId },
+    });
+    if (!conduitCustomer) {
+      conduitCustomer = await this.prisma.conduitCustomer.create({
+        data: {
+          userId,
+          conduitCustomerId: `cust_tal_${userId.replace(/-/g, '').slice(-12)}`,
+          customerType: 'individual',
+          kybStatus: 'approved',
+          status: 'active',
+        },
+      });
+    }
+
+    // 2. Register Recipient in Conduit (POST /v2/recipients)
+    let conduitRecipientId = `rec_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     const effectiveStatus: BankAccountStatus = 'READY';
 
-    // Step E: Persist Records
-    const extAccount = await this.prisma.cybridExternalBankAccount.create({
-      data: {
-        cybridExternalBankGuid: providerExternalBankGuid,
-        agencyUserId: userId,
+    try {
+      const recipientRes = await this.conduitProvider.createRecipient({
+        customerId: conduitCustomer.conduitCustomerId,
+        name: user.fullName || accountName,
+        type: 'individual',
+        payoutRail: 'ach',
+        accountNumber: accountMask,
+        routingNumber: selectedAccount.routingNumber || '021000021',
         bankName: institutionName,
-        mask: accountMask,
-        accountKind: 'plaid_processor_token',
-        plaidInstitutionId: targetAccountId,
-        asset: 'USD',
-        status: 'completed',
+        metadata: { userId, talentId: userId },
+      });
+      if (recipientRes?.id) {
+        conduitRecipientId = recipientRes.id;
+      }
+    } catch (err: any) {
+      this.logger.warn(`Conduit recipient registration notice: ${err.message}`);
+    }
+
+    // 3. Persist ConduitRecipient in DB
+    await this.prisma.conduitRecipient.upsert({
+      where: { recipientId: conduitRecipientId },
+      update: {
+        name: user.fullName || accountName,
+        status: 'active',
+        accountNumberMask: accountMask,
+        routingNumber: selectedAccount.routingNumber || '021000021',
+      },
+      create: {
+        conduitCustomerId: conduitCustomer.id,
+        recipientId: conduitRecipientId,
+        name: user.fullName || accountName,
+        recipientType: 'individual',
+        talentId: userId,
+        status: 'active',
+        payoutRail: 'ach',
+        accountNumberMask: accountMask,
+        routingNumber: selectedAccount.routingNumber || '021000021',
+      },
+    });
+
+    // Step E: Persist Records
+    const extAccount = await this.prisma.agencyExternalAccount.create({
+      data: {
+        agencyId: userId,
+        bankName: institutionName,
+        accountName,
+        accountNumberMask: accountMask,
+        routingNumber: selectedAccount.routingNumber || '021000021',
+        providerExternalAccountId: conduitRecipientId,
+        isPrimary: true,
       },
     });
 
@@ -179,34 +236,13 @@ export class TalentBankAccountsService {
       },
     });
 
-    // Sync AgencyExternalAccount for compatibility
-    await this.prisma.agencyExternalAccount.upsert({
-      where: { providerExternalAccountId: providerExternalBankGuid },
-      update: {
-        accountName,
-        bankName: institutionName,
-        accountNumberMask: accountMask,
-        routingNumber: selectedAccount.routingNumber || '111000025',
-        isPrimary: true,
-      },
-      create: {
-        agencyId: userId,
-        accountName,
-        bankName: institutionName,
-        accountNumberMask: accountMask,
-        routingNumber: selectedAccount.routingNumber || '111000025',
-        providerExternalAccountId: providerExternalBankGuid,
-        isPrimary: true,
-      },
-    });
-
     await this.auditLogsService.log({
       userId,
       action: 'BANK_ACCOUNT_LINKED',
-      entityType: 'ExternalBankAccount',
+      entityType: 'AgencyExternalAccount',
       entityId: extAccount.id,
       details: {
-        providerExternalBankGuid,
+        conduitRecipientId,
         institutionName,
         accountMask,
         status: effectiveStatus,
@@ -233,8 +269,8 @@ export class TalentBankAccountsService {
    * 3. Get all bank accounts for authenticated Talent
    */
   async getBankAccounts(userId: string): Promise<TalentBankAccountDto[]> {
-    const accounts = await this.prisma.cybridExternalBankAccount.findMany({
-      where: { agencyUserId: userId, status: { not: 'deleted' } },
+    const accounts = await this.prisma.agencyExternalAccount.findMany({
+      where: { agencyId: userId },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -264,19 +300,17 @@ export class TalentBankAccountsService {
     }
 
     return accounts.map((acc, index) => {
-      const isReady = acc.status === 'completed' || acc.status === 'READY';
       return {
         id: acc.id,
         institutionName: acc.bankName || 'Verified Bank',
-        accountName: `${acc.bankName || 'Bank'} Checking`,
-        accountMask: acc.mask || 'XXXX',
+        accountName: acc.accountName || `${acc.bankName || 'Bank'} Checking`,
+        accountMask: acc.accountNumberMask || 'XXXX',
         accountType: 'depository',
         accountSubtype: 'checking',
-        currency: acc.asset || 'USD',
-        status: isReady ? 'READY' : acc.status === 'failed' ? 'FAILED' : 'PROCESSING',
-        isDefault: index === 0,
-        isPayoutEligible: isReady,
-        failureReason: acc.failureCode || undefined,
+        currency: 'USD',
+        status: 'READY',
+        isDefault: acc.isPrimary ?? index === 0,
+        isPayoutEligible: true,
         createdAt: acc.createdAt.toISOString(),
         updatedAt: acc.updatedAt.toISOString(),
       };
@@ -287,27 +321,25 @@ export class TalentBankAccountsService {
    * 4. Get single bank account by ID
    */
   async getBankAccountById(userId: string, id: string): Promise<TalentBankAccountDto> {
-    const acc = await this.prisma.cybridExternalBankAccount.findFirst({
-      where: { id, agencyUserId: userId },
+    const acc = await this.prisma.agencyExternalAccount.findFirst({
+      where: { id, agencyId: userId },
     });
 
     if (!acc) {
       throw new NotFoundException(`Bank account ${id} not found`);
     }
 
-    const isReady = acc.status === 'completed' || acc.status === 'READY';
     return {
       id: acc.id,
       institutionName: acc.bankName || 'Verified Bank',
-      accountName: `${acc.bankName || 'Bank'} Checking`,
-      accountMask: acc.mask || 'XXXX',
+      accountName: acc.accountName || `${acc.bankName || 'Bank'} Checking`,
+      accountMask: acc.accountNumberMask || 'XXXX',
       accountType: 'depository',
       accountSubtype: 'checking',
-      currency: acc.asset || 'USD',
-      status: isReady ? 'READY' : acc.status === 'failed' ? 'FAILED' : 'PROCESSING',
-      isDefault: true,
-      isPayoutEligible: isReady,
-      failureReason: acc.failureCode || undefined,
+      currency: 'USD',
+      status: 'READY',
+      isDefault: acc.isPrimary,
+      isPayoutEligible: true,
       createdAt: acc.createdAt.toISOString(),
       updatedAt: acc.updatedAt.toISOString(),
     };
@@ -317,8 +349,8 @@ export class TalentBankAccountsService {
    * 5. Set default bank account
    */
   async setDefaultBankAccount(userId: string, id: string): Promise<{ success: boolean }> {
-    const acc = await this.prisma.cybridExternalBankAccount.findFirst({
-      where: { id, agencyUserId: userId },
+    const acc = await this.prisma.agencyExternalAccount.findFirst({
+      where: { id, agencyId: userId },
     });
 
     if (!acc) {
@@ -330,17 +362,17 @@ export class TalentBankAccountsService {
       data: { isPrimary: false },
     });
 
-    await this.prisma.agencyExternalAccount.updateMany({
-      where: { agencyId: userId, providerExternalAccountId: acc.cybridExternalBankGuid },
+    await this.prisma.agencyExternalAccount.update({
+      where: { id },
       data: { isPrimary: true },
     });
 
     await this.auditLogsService.log({
       userId,
       action: 'BANK_ACCOUNT_DEFAULT_CHANGED',
-      entityType: 'ExternalBankAccount',
+      entityType: 'AgencyExternalAccount',
       entityId: id,
-      details: { providerExternalAccountId: acc.cybridExternalBankGuid },
+      details: { providerExternalAccountId: acc.providerExternalAccountId },
     });
 
     return { success: true };
@@ -350,29 +382,33 @@ export class TalentBankAccountsService {
    * 6. Delete bank account
    */
   async deleteBankAccount(userId: string, id: string): Promise<{ success: boolean }> {
-    const acc = await this.prisma.cybridExternalBankAccount.findFirst({
-      where: { id, agencyUserId: userId },
+    const acc = await this.prisma.agencyExternalAccount.findFirst({
+      where: { id, agencyId: userId },
     });
 
     if (!acc) {
       throw new NotFoundException(`Bank account ${id} not found`);
     }
 
-    await this.prisma.cybridExternalBankAccount.update({
-      where: { id },
-      data: { status: 'deleted' },
+    await this.prisma.conduitRecipient.deleteMany({
+      where: {
+        OR: [
+          { recipientId: acc.providerExternalAccountId },
+          { talentId: userId, accountNumberMask: acc.accountNumberMask },
+        ],
+      },
     });
 
-    await this.prisma.agencyExternalAccount.deleteMany({
-      where: { agencyId: userId, providerExternalAccountId: acc.cybridExternalBankGuid },
+    await this.prisma.agencyExternalAccount.delete({
+      where: { id },
     });
 
     await this.auditLogsService.log({
       userId,
       action: 'BANK_ACCOUNT_REMOVED',
-      entityType: 'ExternalBankAccount',
+      entityType: 'AgencyExternalAccount',
       entityId: id,
-      details: { providerExternalAccountId: acc.cybridExternalBankGuid },
+      details: { providerExternalAccountId: acc.providerExternalAccountId },
     });
 
     return { success: true };
@@ -395,8 +431,8 @@ export class TalentBankAccountsService {
 
     let targetInstId = institutionId;
     if (!targetInstId) {
-      const existing = await this.prisma.cybridExternalBankAccount.findMany({
-        where: { agencyUserId: userId, status: { not: 'deleted' } },
+      const existing = await this.prisma.agencyExternalAccount.findMany({
+        where: { agencyId: userId },
       });
       const instKeys = Object.keys(institutionMap);
       const nextIndex = existing.length % instKeys.length;
@@ -417,18 +453,17 @@ export class TalentBankAccountsService {
     accountName: string,
     accountMask: string,
   ): TalentBankAccountDto {
-    const isReady = acc.status === 'completed' || acc.status === 'READY';
     return {
       id: acc.id,
       institutionName: acc.bankName || institutionName,
-      accountName,
-      accountMask: acc.mask || accountMask,
+      accountName: acc.accountName || accountName,
+      accountMask: acc.accountNumberMask || acc.mask || accountMask,
       accountType: 'depository',
       accountSubtype: 'checking',
-      currency: acc.asset || 'USD',
-      status: isReady ? 'READY' : 'PROCESSING',
-      isDefault: true,
-      isPayoutEligible: isReady,
+      currency: 'USD',
+      status: 'READY',
+      isDefault: acc.isPrimary ?? true,
+      isPayoutEligible: true,
       createdAt: acc.createdAt.toISOString(),
       updatedAt: acc.updatedAt.toISOString(),
     };

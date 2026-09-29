@@ -14,7 +14,7 @@ export class QuickBooksProvider implements IAccountingIntegrationProvider {
   constructor(private readonly configService: ConfigService) {
     const clientId = this.configService.get<string>('QBO_CLIENT_ID');
     const clientSecret = this.configService.get<string>('QBO_CLIENT_SECRET');
-    const redirectUri = this.configService.get<string>('QBO_REDIRECT_URI') || 'http://localhost:3000/api/auth/quickbooks/callback';
+    const redirectUri = this.configService.get<string>('QBO_REDIRECT_URI') || 'http://localhost:3001/api/v1/integrations/quickbooks/callback';
     const env = this.configService.get<string>('QBO_ENV') || 'sandbox';
 
     if (clientId && clientSecret) {

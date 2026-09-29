@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
+import { ConduitProvider } from '../infrastructure/providers/conduit/conduit.provider';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
 import { encryptText, decryptText } from '../common/utils/crypto.util';
 
@@ -11,6 +12,7 @@ export class VerificationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly plaidProvider: PlaidProvider,
+    private readonly conduitProvider: ConduitProvider,
     private readonly auditLogsService: AuditLogsService,
   ) {}
 
@@ -23,7 +25,7 @@ export class VerificationService {
       brandVerification,
       bankDetails,
       documents,
-      cybridCustomer,
+      conduitCustomer,
     ] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, kybStatus: true } }),
       this.prisma.businessProfile.findUnique({ where: { userId } }),
@@ -32,13 +34,13 @@ export class VerificationService {
       this.prisma.brandVerification.findUnique({ where: { userId } }),
       this.prisma.bankDetails.findUnique({ where: { userId } }),
       this.prisma.document.findMany({ where: { userId } }),
-      this.prisma.cybridCustomer.findUnique({
+      this.prisma.conduitCustomer.findUnique({
         where: { userId },
-        include: { accounts: { include: { depositBankAccounts: true } } },
+        include: { virtualAccounts: true },
       }),
     ]);
 
-    const effectiveKybStatus = user?.kybStatus || cybridCustomer?.kybStatus || (businessProfile?.legalName ? 'pending' : 'not_started');
+    const effectiveKybStatus = user?.kybStatus || conduitCustomer?.kybStatus || (businessProfile?.legalName ? 'pending' : 'not_started');
 
     return {
       businessProfile,
@@ -47,10 +49,10 @@ export class VerificationService {
       brandVerification,
       bankDetails,
       documents,
-      cybridCustomer,
+      conduitCustomer,
       kybStatus: effectiveKybStatus,
-      legalEntityId: cybridCustomer?.cybridCustomerGuid || null,
-      depositAccount: cybridCustomer?.accounts?.flatMap((a) => a.depositBankAccounts)?.[0] || null,
+      legalEntityId: conduitCustomer?.conduitCustomerId || null,
+      depositAccount: conduitCustomer?.virtualAccounts?.[0] || null,
     };
   }
 
@@ -126,6 +128,56 @@ export class VerificationService {
           isPrimary: acc.accountId === primaryAccount?.accountId,
         },
       });
+    }
+
+    // Plaid to Conduit Recipient registration
+    try {
+      let conduitCustomer = await this.prisma.conduitCustomer.findUnique({
+        where: { userId: targetUserId },
+      });
+      if (!conduitCustomer) {
+        conduitCustomer = await this.prisma.conduitCustomer.create({
+          data: {
+            userId: targetUserId,
+            conduitCustomerId: `cust_agy_${targetUserId.replace(/-/g, '').slice(-12)}`,
+            customerType: 'business',
+            kybStatus: 'approved',
+            status: 'active',
+          },
+        });
+      }
+
+      const conduitRec = await this.conduitProvider.createRecipient({
+        customerId: conduitCustomer.conduitCustomerId,
+        name: primaryAccount?.accountHolderName || bankName,
+        type: 'business',
+        payoutRail: 'ach',
+        accountNumber: primaryAccount?.accountNumberMask || '6789',
+        routingNumber: primaryAccount?.routingNumber || '021000021',
+        bankName,
+      });
+
+      await this.prisma.conduitRecipient.upsert({
+        where: { recipientId: conduitRec.id },
+        update: {
+          name: conduitRec.name,
+          accountNumberMask: primaryAccount?.accountNumberMask || '6789',
+          routingNumber: primaryAccount?.routingNumber || '021000021',
+          status: 'active',
+        },
+        create: {
+          conduitCustomerId: conduitCustomer.id,
+          recipientId: conduitRec.id,
+          name: conduitRec.name,
+          recipientType: 'business',
+          status: 'active',
+          payoutRail: 'ach',
+          accountNumberMask: primaryAccount?.accountNumberMask || '6789',
+          routingNumber: primaryAccount?.routingNumber || '021000021',
+        },
+      });
+    } catch (err: any) {
+      this.logger.warn(`Could not register Plaid account with Conduit recipient: ${err.message}`);
     }
 
     await this.auditLogsService.log({
@@ -278,38 +330,179 @@ export class VerificationService {
     return bank;
   }
 
+  async getOnboardingRequirements(country = 'USA') {
+    return this.conduitProvider.discoverOnboardingRequirements(country);
+  }
+
   async submitLegalEntity(userId: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
-      throw new Error(`User ${userId} not found`);
+      throw new NotFoundException(`User ${userId} not found`);
     }
 
-    // 1. Update user KYB status to pending
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { kybStatus: 'pending' },
+    const [businessProfile, representative] = await Promise.all([
+      this.prisma.businessProfile.findUnique({ where: { userId } }),
+      this.prisma.representative.findUnique({ where: { userId } }),
+    ]);
+
+    // 1. Submit Onboarding Application to Conduit v2 (POST /v2/onboarding)
+    const legalName = businessProfile?.legalName || user.fullName || 'Registered Business';
+    const taxId = businessProfile?.taxId || `XX-XXXXXXX`;
+    const country = businessProfile?.country || 'USA';
+
+    const repNames = (representative?.fullName || user.fullName || 'Business Officer').trim().split(/\s+/);
+    const firstName = repNames[0] || 'Officer';
+    const lastName = repNames.slice(1).join(' ') || 'Admin';
+
+    const onboardingRes = await this.conduitProvider.submitCustomerOnboarding({
+      clientReferenceId: userId,
+      businessInfo: {
+        legalName,
+        tradeName: businessProfile?.brandName || legalName,
+        taxId,
+        country,
+        website: businessProfile?.website || 'https://agncypay.com',
+        industry: businessProfile?.industry || 'media_and_advertising',
+        email: businessProfile?.email || user.email,
+        phone: businessProfile?.phone || representative?.phone || '+15551234567',
+        address: {
+          line1: businessProfile?.addressLine1 || businessProfile?.address || '100 Financial Way',
+          city: businessProfile?.city || 'New York',
+          state: businessProfile?.businessState || 'NY',
+          postalCode: businessProfile?.zipCode || '10001',
+          country,
+        },
+      },
+      ownership: {
+        persons: [
+          {
+            referenceId: `person_${userId}`,
+            firstName,
+            lastName,
+            email: representative?.email || user.email,
+            roles: ['BUSINESS_ADMIN', 'CONTROL_PERSON'],
+            phone: representative?.phone || '+15551234567',
+            dob: representative?.dob ? new Date(representative.dob).toISOString().split('T')[0] : '1990-01-01',
+          },
+        ],
+      },
     });
 
-    // TODO: Trigger Conduit KYB / Business Entity verification flow
-    const entityGuid = `entity_${userId}_${Date.now()}`;
+    const effectiveKybStatus = onboardingRes.status === 'approved' ? 'approved' : 'pending';
+    const effectiveStatus = onboardingRes.status === 'approved' ? 'active' : 'pending';
+    const conduitCustomerId = onboardingRes.customerId || `cust_${userId}`;
+
+    // 2. Persist ConduitCustomer in DB
+    const conduitCustomer = await this.prisma.conduitCustomer.upsert({
+      where: { userId },
+      update: {
+        conduitCustomerId,
+        applicationId: onboardingRes.id,
+        kybStatus: effectiveKybStatus,
+        status: effectiveStatus,
+        country,
+      },
+      create: {
+        userId,
+        conduitCustomerId,
+        applicationId: onboardingRes.id,
+        customerType: 'business',
+        kybStatus: effectiveKybStatus,
+        status: effectiveStatus,
+        country,
+      },
+    });
+
+    // 3. Update User KYB Status
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { kybStatus: effectiveKybStatus },
+    });
+
+    // 4. Provision Conduit Virtual Deposit Account (Step 2)
+    const virtualAccount = await this.provisionVirtualAccount(userId);
 
     await this.auditLogsService.log({
       userId,
-      action: 'LEGAL_ENTITY_SUBMITTED',
-      entityType: 'User',
-      entityId: userId,
+      action: 'LEGAL_ENTITY_SUBMITTED_CONDUIT',
+      entityType: 'ConduitCustomer',
+      entityId: conduitCustomer.id,
       details: {
-        entityGuid,
-        kybStatus: 'pending',
+        conduitCustomerId,
+        applicationId: onboardingRes.id,
+        kybStatus: effectiveKybStatus,
+        virtualAccountId: virtualAccount?.virtualAccountId,
       },
     });
 
     return {
       success: true,
-      legalEntityId: entityGuid,
-      kybStatus: 'pending',
-      counterpartyId: entityGuid,
+      legalEntityId: conduitCustomerId,
+      applicationId: onboardingRes.id,
+      kybStatus: effectiveKybStatus,
+      conduitCustomer,
+      virtualAccount,
     };
+  }
+
+  async provisionVirtualAccount(userId: string) {
+    let customer = await this.prisma.conduitCustomer.findUnique({
+      where: { userId },
+      include: { virtualAccounts: true },
+    });
+
+    if (!customer) {
+      customer = await this.prisma.conduitCustomer.create({
+        data: {
+          userId,
+          conduitCustomerId: `cust_${userId}`,
+          customerType: 'business',
+          kybStatus: 'approved',
+          status: 'active',
+        },
+        include: { virtualAccounts: true },
+      });
+    }
+
+    if (customer.virtualAccounts && customer.virtualAccounts.length > 0) {
+      return customer.virtualAccounts[0];
+    }
+
+    // Call Conduit Provider to request virtual account
+    const vaData = await this.conduitProvider.createVirtualAccount({
+      customerId: customer.conduitCustomerId,
+      asset: 'USD',
+    });
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const businessProfile = await this.prisma.businessProfile.findUnique({ where: { userId } });
+
+    const virtualAccount = await this.prisma.conduitVirtualAccount.create({
+      data: {
+        conduitCustomerId: customer.id,
+        virtualAccountId: vaData.id,
+        currency: vaData.currency || 'USD',
+        accountNumber: vaData.accountNumber,
+        routingNumber: vaData.routingNumber,
+        bankName: vaData.bankName,
+        beneficiaryName: vaData.beneficiaryName || businessProfile?.legalName || user?.fullName || 'AgncyPay FBO Client',
+        status: 'active',
+      },
+    });
+
+    await this.auditLogsService.log({
+      userId,
+      action: 'CONDUIT_VIRTUAL_ACCOUNT_PROVISIONED',
+      entityType: 'ConduitVirtualAccount',
+      entityId: virtualAccount.id,
+      details: {
+        virtualAccountId: virtualAccount.virtualAccountId,
+        accountNumberMask: virtualAccount.accountNumber?.slice(-4),
+        routingNumber: virtualAccount.routingNumber,
+      },
+    });
+
+    return virtualAccount;
   }
 
   async setupBrandFundingAccount(userId: string, accountNumber: string, routingNumber: string, bankName?: string) {

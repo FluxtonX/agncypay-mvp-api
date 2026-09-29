@@ -1,7 +1,7 @@
 /**
  * Provider-neutral Financial Provider Interface
  *
- * Designed and verified against the official Cybrid OpenAPI specifications.
+ * Designed and verified against the Conduit OpenAPI specifications.
  * Every method returns typed response objects — never raw HTTP responses.
  */
 

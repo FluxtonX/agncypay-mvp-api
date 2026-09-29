@@ -16,23 +16,28 @@ export class QuickBooksService {
     private readonly auditLogsService: AuditLogsService,
   ) {}
 
-  getConnectUrl(agencyId: string): { url: string } {
-    const url = this.oauthService.getAuthUrl(agencyId);
+  getConnectUrl(agencyId: string, returnTo?: string): { url: string } {
+    const url = this.oauthService.getAuthUrl(agencyId, returnTo);
     return { url };
   }
 
-  async handleCallback(code: string, realmId: string, state: string): Promise<string> {
-    const redirectUrl = await this.oauthService.handleCallback(code, realmId, state);
-    const agencyId = state ? state.replace('agency_', '') : '';
-    if (agencyId) {
-      await this.auditLogsService.log({
-        userId: agencyId,
-        action: 'QUICKBOOKS_CONNECTED',
-        entityType: 'QuickBooksConnection',
-        entityId: agencyId,
-        details: { realmId },
-      });
-    }
+  async handleCallback(code: string, realmId: string, state: string, rawUrl?: string): Promise<string> {
+    const redirectUrl = await this.oauthService.handleCallback(code, realmId, state, rawUrl);
+    try {
+      let agencyId = state ? state.replace('agency_', '') : '';
+      if (agencyId && agencyId.includes('___')) {
+        agencyId = agencyId.split('___')[0];
+      }
+      if (agencyId) {
+        await this.auditLogsService.log({
+          userId: agencyId,
+          action: 'QUICKBOOKS_CONNECTED',
+          entityType: 'QuickBooksConnection',
+          entityId: agencyId,
+          details: { realmId },
+        });
+      }
+    } catch (_) {}
     return redirectUrl;
   }
 

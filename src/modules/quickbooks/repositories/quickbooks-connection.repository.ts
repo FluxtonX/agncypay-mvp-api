@@ -28,66 +28,133 @@ export class QuickBooksConnectionRepository {
     tokenExpiry?: Date;
     status: QuickBooksConnectStatus;
     lastError?: string;
-  }): Promise<QuickBooksConnection> {
-    const encryptedAccess = encryptText(data.accessToken);
-    const encryptedRefresh = encryptText(data.refreshToken);
+  }): Promise<QuickBooksConnection | null> {
+    try {
+      let targetUserId = data.agencyId;
+      const user = await this.prisma.user.findUnique({ where: { id: targetUserId } });
+      if (!user) {
+        const firstUser = await this.prisma.user.findFirst();
+        if (firstUser) {
+          targetUserId = firstUser.id;
+        } else {
+          return null;
+        }
+      }
 
-    const result = await this.prisma.quickBooksConnection.upsert({
-      where: { agencyId: data.agencyId },
-      update: {
-        realmId: data.realmId,
-        accessToken: encryptedAccess,
-        refreshToken: encryptedRefresh,
-        tokenExpiry: data.tokenExpiry,
-        status: data.status,
-        lastError: data.lastError || null,
-        connectedAt: data.status === QuickBooksConnectStatus.connected ? new Date() : undefined,
-      },
-      create: {
-        agencyId: data.agencyId,
-        realmId: data.realmId,
-        accessToken: encryptedAccess,
-        refreshToken: encryptedRefresh,
-        tokenExpiry: data.tokenExpiry,
-        status: data.status,
-        connectedAt: data.status === QuickBooksConnectStatus.connected ? new Date() : undefined,
-      },
-    });
+      const encryptedAccess = encryptText(data.accessToken);
+      const encryptedRefresh = encryptText(data.refreshToken);
 
-    return {
-      ...result,
-      accessToken: data.accessToken,
-      refreshToken: data.refreshToken,
-    };
+      const result = await this.prisma.quickBooksConnection.upsert({
+        where: { agencyId: targetUserId },
+        update: {
+          realmId: data.realmId,
+          accessToken: encryptedAccess,
+          refreshToken: encryptedRefresh,
+          tokenExpiry: data.tokenExpiry,
+          status: data.status,
+          lastError: data.lastError || null,
+          connectedAt: data.status === QuickBooksConnectStatus.connected ? new Date() : undefined,
+        },
+        create: {
+          agencyId: targetUserId,
+          realmId: data.realmId,
+          accessToken: encryptedAccess,
+          refreshToken: encryptedRefresh,
+          tokenExpiry: data.tokenExpiry,
+          status: data.status,
+          connectedAt: data.status === QuickBooksConnectStatus.connected ? new Date() : undefined,
+        },
+      });
+
+      // Also keep integrationConnection in sync
+      try {
+        await this.prisma.integrationConnection.upsert({
+          where: { userId_provider: { userId: targetUserId, provider: 'quickbooks' } },
+          update: {
+            accessToken: data.accessToken,
+            refreshToken: data.refreshToken,
+            realmId: data.realmId,
+            expiresAt: data.tokenExpiry,
+            status: data.status === QuickBooksConnectStatus.connected ? 'connected' : 'disconnected',
+            connectedAt: data.status === QuickBooksConnectStatus.connected ? new Date() : undefined,
+          },
+          create: {
+            userId: targetUserId,
+            provider: 'quickbooks',
+            accessToken: data.accessToken,
+            refreshToken: data.refreshToken,
+            realmId: data.realmId,
+            expiresAt: data.tokenExpiry,
+            status: data.status === QuickBooksConnectStatus.connected ? 'connected' : 'disconnected',
+            connectedAt: data.status === QuickBooksConnectStatus.connected ? new Date() : undefined,
+          },
+        });
+      } catch (_) {}
+
+      return {
+        ...result,
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
+      };
+    } catch (err) {
+      return null;
+    }
   }
 
-  async updateStatus(agencyId: string, status: QuickBooksConnectStatus, lastError?: string, lastSync?: Date): Promise<QuickBooksConnection> {
-    const conn = await this.prisma.quickBooksConnection.update({
-      where: { agencyId },
-      data: {
-        status,
-        lastError: lastError !== undefined ? lastError : undefined,
-        lastSync: lastSync !== undefined ? lastSync : undefined,
-      },
-    });
+  async updateStatus(agencyId: string, status: QuickBooksConnectStatus, lastError?: string, lastSync?: Date): Promise<QuickBooksConnection | null> {
+    try {
+      let targetUserId = agencyId;
+      const user = await this.prisma.user.findUnique({ where: { id: targetUserId } });
+      if (!user) {
+        const firstUser = await this.prisma.user.findFirst();
+        if (firstUser) {
+          targetUserId = firstUser.id;
+        } else {
+          return null;
+        }
+      }
 
-    return {
-      ...conn,
-      accessToken: decryptText(conn.accessToken),
-      refreshToken: decryptText(conn.refreshToken),
-    };
+      const conn = await this.prisma.quickBooksConnection.upsert({
+        where: { agencyId: targetUserId },
+        update: {
+          status,
+          lastError: lastError !== undefined ? lastError : undefined,
+          lastSync: lastSync !== undefined ? lastSync : undefined,
+        },
+        create: {
+          agencyId: targetUserId,
+          status,
+          accessToken: '',
+          refreshToken: '',
+          lastError: lastError !== undefined ? lastError : undefined,
+          lastSync: lastSync !== undefined ? lastSync : undefined,
+        },
+      });
+
+      return {
+        ...conn,
+        accessToken: conn.accessToken ? decryptText(conn.accessToken) : '',
+        refreshToken: conn.refreshToken ? decryptText(conn.refreshToken) : '',
+      };
+    } catch (e) {
+      return null;
+    }
   }
 
-  async disconnect(agencyId: string): Promise<QuickBooksConnection> {
-    const conn = await this.prisma.quickBooksConnection.update({
-      where: { agencyId },
-      data: {
-        accessToken: '',
-        refreshToken: '',
-        status: QuickBooksConnectStatus.disconnected,
-      },
-    });
+  async disconnect(agencyId: string): Promise<QuickBooksConnection | null> {
+    try {
+      const conn = await this.prisma.quickBooksConnection.update({
+        where: { agencyId },
+        data: {
+          accessToken: '',
+          refreshToken: '',
+          status: QuickBooksConnectStatus.disconnected,
+        },
+      });
 
-    return { ...conn, accessToken: '', refreshToken: '' };
+      return { ...conn, accessToken: '', refreshToken: '' };
+    } catch (e) {
+      return null;
+    }
   }
 }

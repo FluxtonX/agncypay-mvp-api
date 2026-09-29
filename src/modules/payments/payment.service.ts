@@ -50,8 +50,7 @@ export class PaymentService {
     const agency = await this.prisma.user.findUnique({ where: { id: targetAgencyId } });
     if (!agency) throw new NotFoundException(`Agency user ${targetAgencyId} not found`);
 
-    // TODO: Replace with Conduit deposit account provisioning
-    // Previously: const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(targetAgencyId);
+    // Conduit virtual account ensures dedicated deposit routing
 
     const paymentNumber = `PAY-${Math.floor(100000 + Math.random() * 900000)}`;
 

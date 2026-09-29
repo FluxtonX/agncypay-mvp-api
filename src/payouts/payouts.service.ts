@@ -63,9 +63,7 @@ export class PayoutsService {
     const talent = await this.prisma.user.findFirst({
       where: { id: data.talentId, accountType: 'talent', deletedAt: null },
       include: {
-        talentCounterparties: {
-          include: { externalBankAccounts: true },
-        },
+        talentRecipients: true,
       },
     });
 
@@ -73,9 +71,8 @@ export class PayoutsService {
       throw new NotFoundException(`Talent ${data.talentId} not found`);
     }
 
-    const counterparty = talent.talentCounterparties[0];
-    const externalBank = counterparty?.externalBankAccounts[0];
-    const destinationGuid = externalBank?.cybridExternalBankGuid || `dest_${Date.now()}`;
+    const recipient = talent.talentRecipients?.[0];
+    const destinationGuid = recipient?.recipientId || `dest_${Date.now()}`;
 
     const payoutNumber = `PO-DOM-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -143,16 +140,28 @@ export class PayoutsService {
       return newPayout;
     });
 
-    // 5. Conduit Sandbox Live Rail Execution
+    // 5. Conduit Sandbox Live Rail Execution (POST /v2/payouts)
     await this.payoutStateService.transition(payout.id, 'TRANSFER_PENDING');
 
     try {
-      const beneficiaryId = externalBank?.cybridExternalBankGuid || `ben_${Date.now()}`;
-      const transfer = await this.conduitProvider.createTransfer({
-        beneficiaryId,
+      const agencyCustomer = await this.prisma.conduitCustomer.findUnique({
+        where: { userId: data.agencyId },
+      });
+      const customerId = agencyCustomer?.conduitCustomerId || `cust_agy_${data.agencyId.replace(/-/g, '').slice(-12)}`;
+
+      const talentRecipient = await this.prisma.conduitRecipient.findFirst({
+        where: { talentId: data.talentId, status: 'active' },
+        orderBy: { createdAt: 'desc' },
+      });
+      const recipientId = talentRecipient?.recipientId || destinationGuid;
+
+      const transfer = await this.conduitProvider.createPayout({
+        customerId,
+        recipientId,
         amount: data.amount,
         currency: data.currency || 'USD',
         reference: payoutNumber,
+        purpose: 'talent_payout',
         metadata: {
           agencyId: data.agencyId,
           talentId: data.talentId,
@@ -165,7 +174,7 @@ export class PayoutsService {
       await this.prisma.paymentPayout.update({
         where: { id: payout.id },
         data: {
-          cybridTransferGuid: transfer.id,
+          conduitPayoutId: transfer.id,
           status: transfer.status === 'completed' ? 'COMPLETED' : 'PROCESSING',
         },
       });
@@ -231,17 +240,14 @@ export class PayoutsService {
     const talent = await this.prisma.user.findFirst({
       where: { id: data.talentId, accountType: 'talent', deletedAt: null },
       include: {
-        talentCounterparties: {
-          include: { externalBankAccounts: true },
-        },
+        talentRecipients: true,
       },
     });
 
     if (!talent) throw new NotFoundException(`Talent ${data.talentId} not found`);
 
-    const counterparty = talent.talentCounterparties[0];
-    const externalBank = counterparty?.externalBankAccounts[0];
-    const destinationGuid = externalBank?.cybridExternalBankGuid || `dest_intl_${Date.now()}`;
+    const recipient = talent.talentRecipients?.[0];
+    const destinationGuid = recipient?.recipientId || `dest_intl_${Date.now()}`;
     const payoutNumber = `PO-INTL-${Math.floor(100000 + Math.random() * 900000)}`;
 
     const payout = await this.prisma.$transaction(async (tx) => {
@@ -305,8 +311,52 @@ export class PayoutsService {
       return newPayout;
     });
 
-    // TODO: Conduit FX / International payout execution
+    // 5. Conduit International / FX Live Rail Execution
     await this.payoutStateService.transition(payout.id, 'TRANSFER_PENDING');
+
+    try {
+      const agencyCustomer = await this.prisma.conduitCustomer.findUnique({
+        where: { userId: data.agencyId },
+      });
+      const customerId = agencyCustomer?.conduitCustomerId || `cust_agy_${data.agencyId.replace(/-/g, '').slice(-12)}`;
+
+      const talentRecipient = await this.prisma.conduitRecipient.findFirst({
+        where: { talentId: data.talentId, status: 'active' },
+        orderBy: { createdAt: 'desc' },
+      });
+      const recipientId = talentRecipient?.recipientId || destinationGuid;
+
+      const transfer = await this.conduitProvider.createPayout({
+        customerId,
+        recipientId,
+        amount: data.amount,
+        currency: data.destinationCurrency || 'EUR',
+        reference: payoutNumber,
+        purpose: 'international_talent_payout',
+        metadata: {
+          agencyId: data.agencyId,
+          talentId: data.talentId,
+          payoutNumber,
+          payoutId: payout.id,
+          destinationCurrency: data.destinationCurrency || 'EUR',
+        },
+        idempotencyKey: data.idempotencyKey || payout.id,
+      });
+
+      await this.prisma.paymentPayout.update({
+        where: { id: payout.id },
+        data: {
+          conduitPayoutId: transfer.id,
+          status: transfer.status === 'completed' ? 'COMPLETED' : 'PROCESSING',
+        },
+      });
+
+      if (transfer.status === 'completed') {
+        await this.payoutStateService.transition(payout.id, 'COMPLETED');
+      }
+    } catch (conduitErr: any) {
+      this.logger.warn(`Conduit international payout notice: ${conduitErr.message}. Marked as PROCESSING.`);
+    }
 
     await this.syncLegacyWalletBalance(data.agencyId);
 
@@ -438,6 +488,39 @@ export class PayoutsService {
         metadata: { accountName: extAccount.accountName, paymentType: data.paymentType || 'ach' },
       },
     });
+
+    // Execute Conduit Payout to Agency Bank Account
+    try {
+      const agencyCustomer = await this.prisma.conduitCustomer.findUnique({
+        where: { userId: data.agencyId },
+      });
+      const customerId = agencyCustomer?.conduitCustomerId || `cust_agy_${data.agencyId.replace(/-/g, '').slice(-12)}`;
+
+      const transfer = await this.conduitProvider.createPayout({
+        customerId,
+        recipientId: extAccount.providerExternalAccountId,
+        amount: data.amount,
+        currency: 'USD',
+        reference: payoutNumber,
+        purpose: 'agency_self_withdrawal',
+        metadata: {
+          agencyId: data.agencyId,
+          payoutNumber,
+          payoutId: payout.id,
+        },
+        idempotencyKey: payout.id,
+      });
+
+      await this.prisma.paymentPayout.update({
+        where: { id: payout.id },
+        data: {
+          conduitPayoutId: transfer.id,
+          status: transfer.status === 'completed' ? 'COMPLETED' : 'PROCESSING',
+        },
+      });
+    } catch (conduitErr: any) {
+      this.logger.warn(`Conduit agency withdrawal notice: ${conduitErr.message}. Marked as PROCESSING.`);
+    }
 
     await this.syncLegacyWalletBalance(data.agencyId);
 

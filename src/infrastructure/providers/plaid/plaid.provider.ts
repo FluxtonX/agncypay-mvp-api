@@ -157,7 +157,7 @@ export class PlaidProvider implements IBankVerificationProvider {
     }
   }
 
-  async createProcessorToken(accessToken: string, accountId: string, processor = 'cybrid'): Promise<string> {
+  async createProcessorToken(accessToken: string, accountId: string, processor = 'conduit'): Promise<string> {
     const client = this.ensureClient();
 
     try {

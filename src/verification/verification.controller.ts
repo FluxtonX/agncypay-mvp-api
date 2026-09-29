@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { VerificationService } from './verification.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -133,4 +133,28 @@ export class VerificationController {
   async skipVerification(@CurrentUser('id') userId: string) {
     return this.verificationService.skipVerification(userId);
   }
+
+  // ─── CONDUIT V2 FINANCIAL INFRASTRUCTURE ENDPOINTS ───────────────
+
+  @ApiOperation({ summary: 'Discover Conduit KYB onboarding requirements by country' })
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get('conduit/requirements')
+  async getConduitRequirements(@Query('country') country?: string) {
+    return this.verificationService.getOnboardingRequirements(country || 'USA');
+  }
+
+  @ApiOperation({ summary: 'Submit Brand or Agency KYB onboarding to Conduit (POST /v2/onboarding)' })
+  @UseGuards(JwtAuthGuard)
+  @Post('conduit/submit-onboarding')
+  async submitConduitOnboarding(@CurrentUser('id') userId: string) {
+    return this.verificationService.submitLegalEntity(userId);
+  }
+
+  @ApiOperation({ summary: 'Provision dedicated Conduit Virtual Deposit Account (USD)' })
+  @UseGuards(JwtAuthGuard)
+  @Post('conduit/virtual-account')
+  async provisionVirtualAccount(@CurrentUser('id') userId: string) {
+    return this.verificationService.provisionVirtualAccount(userId);
+  }
 }
+

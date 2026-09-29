@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Query, Res, Req, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Response } from 'express';
 import { QuickBooksService } from './quickbooks.service';
@@ -14,8 +14,8 @@ export class QuickBooksController {
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Generate QuickBooks OAuth 2.0 Authorization URL' })
   @Get('connect')
-  async connect(@CurrentUser('id') agencyId: string) {
-    return this.quickbooksService.getConnectUrl(agencyId);
+  async connect(@CurrentUser('id') agencyId: string, @Query('returnTo') returnTo?: string) {
+    return this.quickbooksService.getConnectUrl(agencyId, returnTo);
   }
 
   @ApiOperation({ summary: 'QuickBooks OAuth 2.0 Callback handler' })
@@ -24,10 +24,15 @@ export class QuickBooksController {
     @Query('code') code: string,
     @Query('realmId') realmId: string,
     @Query('state') state: string,
+    @Req() req: any,
     @Res() res: any,
   ) {
-    const redirectUrl = await this.quickbooksService.handleCallback(code, realmId, state);
-    return res.redirect(redirectUrl);
+    try {
+      const redirectUrl = await this.quickbooksService.handleCallback(code, realmId, state, req.url);
+      return res.redirect(redirectUrl);
+    } catch (err: any) {
+      return res.redirect(`http://localhost:3000/branddashboard?qb_error=${encodeURIComponent(err.message || 'QuickBooks authorization failed.')}`);
+    }
   }
 
 

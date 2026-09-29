@@ -56,32 +56,32 @@ export class TalentService {
       });
     }
 
-    // 2. Provision Counterparty / Beneficiary Record
-    // Note: Provider counterparty GUID will be generated via Conduit financial provider adapter
-    const counterpartyGuid = `cp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    // 2. Provision Conduit Recipient / Beneficiary Record
+    const recipientId = `rec_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-    // Ensure dummy customer record exists in DB if needed for foreign keys
-    let customer = await this.prisma.cybridCustomer.findFirst({
+    let customer = await this.prisma.conduitCustomer.findFirst({
       where: { userId: data.agencyId },
     });
     if (!customer) {
-      customer = await this.prisma.cybridCustomer.create({
+      customer = await this.prisma.conduitCustomer.create({
         data: {
           userId: data.agencyId,
-          cybridCustomerGuid: `cust_${data.agencyId}`,
+          conduitCustomerId: `cust_${data.agencyId}`,
           kybStatus: 'approved',
+          status: 'active',
         },
       });
     }
 
-    const counterparty = await this.prisma.cybridCounterparty.create({
+    const recipient = await this.prisma.conduitRecipient.create({
       data: {
-        cybridCustomerId: customer.id,
-        cybridCounterpartyGuid: counterpartyGuid,
+        conduitCustomerId: customer.id,
+        recipientId,
         name: data.fullName,
-        counterpartyType: 'individual',
+        recipientType: 'individual',
         talentId: talent.id,
-        status: 'verified',
+        status: 'active',
+        payoutRail: 'ach',
       },
     });
 
@@ -92,14 +92,14 @@ export class TalentService {
       entityId: talent.id,
       details: {
         talentName: talent.fullName,
-        counterpartyGuid,
+        recipientId: recipient.recipientId,
         isInternational: data.isInternational || false,
       },
     });
 
     return {
       talent,
-      counterparty,
+      recipient,
     };
   }
 
@@ -155,9 +155,7 @@ export class TalentService {
     return this.prisma.user.findMany({
       where: { agencyId, accountType: 'talent', deletedAt: null },
       include: {
-        talentCounterparties: {
-          include: { externalBankAccounts: true },
-        },
+        talentRecipients: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -167,9 +165,7 @@ export class TalentService {
     const talent = await this.prisma.user.findFirst({
       where: { id: talentId, agencyId, accountType: 'talent', deletedAt: null },
       include: {
-        talentCounterparties: {
-          include: { externalBankAccounts: true },
-        },
+        talentRecipients: true,
         talentPayouts: {
           orderBy: { createdAt: 'desc' },
           take: 10,
@@ -270,25 +266,20 @@ export class TalentService {
   async getTalentBanking(talentId: string, agencyId: string) {
     const talent = await this.getTalentById(talentId, agencyId);
 
-    const counterparties = talent.talentCounterparties.map((cp) => ({
-      guid: cp.cybridCounterpartyGuid,
-      name: cp.name,
-      type: cp.counterpartyType,
-      status: cp.status,
-      bankAccounts: cp.externalBankAccounts.map((ba) => ({
-        id: ba.id,
-        bankName: ba.bankName,
-        mask: ba.mask,
-        asset: ba.asset,
-        status: ba.status,
-        guid: ba.cybridExternalBankGuid,
-      })),
+    const recipients = (talent.talentRecipients || []).map((rec) => ({
+      guid: rec.recipientId,
+      name: rec.name,
+      type: rec.recipientType,
+      status: rec.status,
+      rail: rec.payoutRail,
+      accountMask: rec.accountNumberMask,
+      walletAddress: rec.walletAddress,
     }));
 
     return {
       talentId: talent.id,
       fullName: talent.fullName,
-      counterparties,
+      recipients,
     };
   }
 
