@@ -2,7 +2,6 @@ import { Injectable, NotFoundException, BadRequestException, ForbiddenException,
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { LedgerService } from '../ledger/ledger.service';
-import { CybridAccountService } from '../cybrid/cybrid-account.service';
 import { PaymentStateService } from './payment-state.service';
 
 @Injectable()
@@ -13,7 +12,6 @@ export class PaymentService {
     private readonly prisma: PrismaService,
     private readonly auditLogsService: AuditLogsService,
     private readonly ledgerService: LedgerService,
-    private readonly cybridAccountService: CybridAccountService,
     private readonly paymentStateService: PaymentStateService,
   ) {}
 
@@ -52,8 +50,8 @@ export class PaymentService {
     const agency = await this.prisma.user.findUnique({ where: { id: targetAgencyId } });
     if (!agency) throw new NotFoundException(`Agency user ${targetAgencyId} not found`);
 
-    // Ensure Agency has a Cybrid Deposit Bank Account for receiving external funds
-    const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(targetAgencyId);
+    // TODO: Replace with Conduit deposit account provisioning
+    // Previously: const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(targetAgencyId);
 
     const paymentNumber = `PAY-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -67,7 +65,7 @@ export class PaymentService {
         currency: data.currency || 'USD',
         status: 'PENDING_FUNDING',
         paymentMethod: data.paymentMethod || 'ach',
-        cybridDepositRef: depositAccount.uniqueMemoId || depositAccount.accountNumber,
+        // TODO: Replace with Conduit deposit reference
         metadata: data.metadata || {},
       },
     });
@@ -81,23 +79,22 @@ export class PaymentService {
         paymentNumber,
         amount: targetAmount,
         agencyId: targetAgencyId,
-        depositRef: payment.cybridDepositRef,
       },
     });
 
-    // Return payment with funding instructions for the Brand
-    const fundingInstructions = await this.cybridAccountService.getAgencyFundingInstructions(targetAgencyId);
-
+    // TODO: Replace with Conduit funding instructions
     return {
       payment,
-      fundingInstructions,
+      fundingInstructions: {
+        message: 'Conduit funding instructions will be provided once the provider is integrated.',
+      },
     };
   }
 
   async markPaymentFunded(
     paymentId: string,
     details?: {
-      transferGuid?: string;
+      transferRef?: string;
       rawPayload?: any;
     },
   ) {
@@ -106,17 +103,17 @@ export class PaymentService {
 
     // Transition to FUNDED
     await this.paymentStateService.transition(paymentId, 'FUNDED', {
-      providerRef: details?.transferGuid,
+      providerRef: details?.transferRef,
     });
 
     // Record provider operation
-    if (details?.transferGuid) {
+    if (details?.transferRef) {
       await this.prisma.providerOperation.upsert({
         where: {
           provider_operationType_operationGuid: {
-            provider: 'cybrid',
+            provider: 'conduit',
             operationType: 'transfer',
-            operationGuid: details.transferGuid,
+            operationGuid: details.transferRef,
           },
         },
         update: {
@@ -124,18 +121,13 @@ export class PaymentService {
           rawResponse: details.rawPayload || {},
         },
         create: {
-          provider: 'cybrid',
+          provider: 'conduit',
           operationType: 'transfer',
-          operationGuid: details.transferGuid,
+          operationGuid: details.transferRef,
           paymentId: payment.id,
           status: 'completed',
           rawResponse: details.rawPayload || {},
         },
-      });
-
-      await this.prisma.payment.update({
-        where: { id: paymentId },
-        data: { cybridTransferGuid: details.transferGuid },
       });
     }
 
@@ -143,17 +135,17 @@ export class PaymentService {
     // Debit: Platform clearing account (holding inbound funds)
     // Credit: Agency USD account (balance available to agency)
     await this.ledgerService.postJournalEntry({
-      debitAccountCode: `CLEARING:CYBRID_DEPOSIT:USD`,
+      debitAccountCode: `CLEARING:INBOUND_DEPOSIT:USD`,
       creditAccountCode: `AGENCY:${payment.agencyId}:USD`,
       amount: Number(payment.amount),
       currency: payment.currency,
       referenceType: 'BRAND_PAYMENT_FUNDED',
       referenceId: payment.id,
-      providerReference: details?.transferGuid || payment.cybridDepositRef || undefined,
+      providerReference: details?.transferRef || undefined,
       description: `Inbound funding for Payment ${payment.paymentNumber} from Brand`,
     });
 
-    // Update invoice if linked — mark as funded (not disbursed, as payouts haven't happened yet)
+    // Update invoice if linked
     if (payment.invoiceId) {
       await this.prisma.invoice.update({
         where: { id: payment.invoiceId },
@@ -185,10 +177,6 @@ export class PaymentService {
     } catch (err) {
       this.logger.warn(`Could not sync wallet for agency ${payment.agencyId}: ${err.message}`);
     }
-
-    // NOTE: Payment stays in FUNDED state.
-    // It transitions to COMPLETED only when the webhook handler confirms
-    // the Cybrid transfer has fully settled.
 
     return await this.prisma.payment.findUnique({ where: { id: paymentId } });
   }
@@ -230,7 +218,13 @@ export class PaymentService {
 
   async getFundingInstructions(paymentId: string, requestingUserId: string) {
     const payment = await this.getPaymentById(paymentId, requestingUserId);
-    return this.cybridAccountService.getAgencyFundingInstructions(payment.agencyId);
+    // TODO: Replace with Conduit funding instructions API
+    return {
+      paymentId: payment.id,
+      paymentNumber: payment.paymentNumber,
+      amount: payment.amount,
+      currency: payment.currency,
+      message: 'Conduit funding instructions will be available once the provider is integrated.',
+    };
   }
 }
-

@@ -2,8 +2,6 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
-import { CybridCustomerService } from '../modules/cybrid/cybrid-customer.service';
-import { CybridAccountService } from '../modules/cybrid/cybrid-account.service';
 import { encryptText, decryptText } from '../common/utils/crypto.util';
 
 @Injectable()
@@ -14,8 +12,6 @@ export class VerificationService {
     private readonly prisma: PrismaService,
     private readonly plaidProvider: PlaidProvider,
     private readonly auditLogsService: AuditLogsService,
-    private readonly cybridCustomerService: CybridCustomerService,
-    private readonly cybridAccountService: CybridAccountService,
   ) {}
 
   async getVerificationState(userId: string) {
@@ -288,31 +284,31 @@ export class VerificationService {
       throw new Error(`User ${userId} not found`);
     }
 
-    // 1. Create Cybrid Business Customer and trigger KYB
-    const kybResult = await this.cybridCustomerService.initiateKYB(userId);
+    // 1. Update user KYB status to pending
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { kybStatus: 'pending' },
+    });
 
-    // 2. Automatically provision USD Fiat Account & Deposit Bank Account
-    const depositAccount = await this.cybridAccountService.ensureDepositBankAccount(userId);
+    // TODO: Trigger Conduit KYB / Business Entity verification flow
+    const entityGuid = `entity_${userId}_${Date.now()}`;
 
     await this.auditLogsService.log({
       userId,
-      action: 'CYBRID_ONBOARDING_COMPLETED',
+      action: 'LEGAL_ENTITY_SUBMITTED',
       entityType: 'User',
       entityId: userId,
       details: {
-        customerGuid: kybResult.customer.cybridCustomerGuid,
-        kybStatus: kybResult.kybStatus,
-        depositBankGuid: depositAccount.cybridDepositBankGuid,
+        entityGuid,
+        kybStatus: 'pending',
       },
     });
 
     return {
       success: true,
-      legalEntityId: kybResult.customer.cybridCustomerGuid,
-      kybStatus: kybResult.kybStatus,
-      internalAccountId: depositAccount.cybridAccountId,
-      counterpartyId: kybResult.customer.cybridCustomerGuid,
-      depositAccount,
+      legalEntityId: entityGuid,
+      kybStatus: 'pending',
+      counterpartyId: entityGuid,
     };
   }
 
@@ -356,7 +352,7 @@ export class VerificationService {
     };
   }
 
-  async createPlaidProcessorToken(userId: string, processor = 'cybrid') {
+  async createPlaidProcessorToken(userId: string, processor = 'conduit') {
     const bankDetails = await this.prisma.bankDetails.findUnique({ where: { userId } });
     if (!bankDetails || !bankDetails.plaidAccessToken || !bankDetails.plaidAccountId) {
       throw new NotFoundException(`Plaid verified bank details not found for user ${userId}`);
@@ -372,5 +368,97 @@ export class VerificationService {
     );
 
     return { processorToken };
+  }
+
+  async submitTalentKYC(userId: string, data: {
+    legalFullName?: string;
+    dateOfBirth?: string;
+    country?: string;
+    street?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    nationalIdLast4?: string;
+  }) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+
+    if (data.legalFullName) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          fullName: data.legalFullName,
+          kybStatus: 'pending',
+        },
+      });
+    } else {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { kybStatus: 'pending' },
+      });
+    }
+
+    const addressStr = [data.street, data.city, data.state, data.postalCode].filter(Boolean).join(', ');
+    await this.prisma.representative.upsert({
+      where: { userId },
+      update: {
+        fullName: data.legalFullName || user.fullName,
+        dob: data.dateOfBirth || '',
+        nationality: data.country || 'US',
+        address: addressStr,
+        status: 'processing',
+      },
+      create: {
+        userId,
+        fullName: data.legalFullName || user.fullName,
+        dob: data.dateOfBirth || '',
+        nationality: data.country || 'US',
+        address: addressStr,
+        status: 'processing',
+      },
+    });
+
+    await this.auditLogsService.log({
+      userId,
+      action: 'TALENT_KYC_SUBMITTED',
+      entityType: 'User',
+      entityId: userId,
+      details: {
+        country: data.country || 'US',
+        hasSsn: !!data.nationalIdLast4,
+      },
+    });
+
+    return {
+      success: true,
+      status: 'pending',
+      message: 'Talent identity verification submitted successfully',
+    };
+  }
+
+  async skipVerification(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+
+    await this.auditLogsService.log({
+      userId,
+      action: 'VERIFICATION_SKIPPED',
+      entityType: 'User',
+      entityId: userId,
+      details: {
+        previousStatus: user.kybStatus,
+        reason: 'User skipped onboarding verification',
+      },
+    });
+
+    return {
+      success: true,
+      status: 'skipped',
+      message: 'Verification skipped. You can complete verification before initiating payments.',
+    };
   }
 }

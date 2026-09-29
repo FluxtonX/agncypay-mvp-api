@@ -273,6 +273,49 @@ export class AuthService {
     });
   }
 
+  async getMe(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        accountType: true,
+        agncyId: true,
+        emailVerified: true,
+        kybStatus: true,
+        createdAt: true,
+        wallet: true,
+        bankDetails: true,
+        businessProfile: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    return {
+      id: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      displayName: user.fullName,
+      accountType: user.accountType,
+      role: user.accountType,
+      agncyId: user.agncyId,
+      emailVerified: user.emailVerified,
+      kybStatus: user.kybStatus,
+      kycStatus: user.kybStatus,
+      availableBalance: user.wallet?.balance || 0,
+      liquidityBalance: user.wallet?.balance || 0,
+      pendingBalance: 0,
+      crystallizedBalance: 0,
+      createdAt: user.createdAt,
+      bankDetails: user.bankDetails,
+      businessProfile: user.businessProfile,
+    };
+  }
+
   private async generateTokens(userId: string, email: string) {
     const payload = { sub: userId, email };
 

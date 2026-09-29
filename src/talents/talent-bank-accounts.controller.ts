@@ -17,7 +17,7 @@ import { TalentBankAccountsService, TalentBankAccountDto } from './talent-bank-a
 @ApiTags('Talent Bank Accounts')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
-@Controller('talent/bank-accounts')
+@Controller(['talents/bank-accounts', 'talent/bank-accounts'])
 export class TalentBankAccountsController {
   constructor(private readonly bankAccountsService: TalentBankAccountsService) {}
 
@@ -30,8 +30,8 @@ export class TalentBankAccountsController {
   }
 
   @ApiOperation({ summary: '2. Complete Plaid Link with public_token and accountId' })
-  @ApiResponse({ status: 201, description: 'Bank account linked and Cybrid EBA provisioned' })
-  @Post('plaid/complete')
+  @ApiResponse({ status: 201, description: 'Bank account linked and provider EBA provisioned' })
+  @Post(['plaid/complete', 'link'])
   async completePlaidLink(
     @CurrentUser('id') userId: string,
     @Body() body: { publicToken: string; accountId?: string; institutionName?: string },

@@ -19,12 +19,11 @@ import { QuickBooksModule } from './modules/quickbooks/quickbooks.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { PayoutsModule } from './payouts/payouts.module';
 
-// Cybrid MVP Modules
-import { CybridModule } from './infrastructure/providers/cybrid/cybrid.module';
 import { LedgerModule } from './modules/ledger/ledger.module';
 import { TalentModule } from './talents/talent.module';
 import { PaymentModule } from './modules/payments/payment.module';
 import { ReconciliationModule } from './modules/reconciliation/reconciliation.module';
+import { CrmModule } from './modules/crm/crm.module';
 
 @Module({
   imports: [
@@ -35,7 +34,6 @@ import { ReconciliationModule } from './modules/reconciliation/reconciliation.mo
     FeatureFlagsModule,
     WalletsModule,
     QuickBooksModule,
-    CybridModule,
     LedgerModule,
     TalentModule,
     PaymentModule,
@@ -50,6 +48,7 @@ import { ReconciliationModule } from './modules/reconciliation/reconciliation.mo
     VerificationModule,
     TreasuryModule,
     IntegrationsModule,
+    CrmModule,
   ],
   controllers: [AppController],
   providers: [AppService],

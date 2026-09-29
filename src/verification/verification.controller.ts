@@ -119,4 +119,18 @@ export class VerificationController {
   ) {
     return this.verificationService.setupBrandFundingAccount(userId, accountNumber, routingNumber, bankName);
   }
+
+  @ApiOperation({ summary: 'Submit Talent KYC identity details' })
+  @UseGuards(JwtAuthGuard)
+  @Post('talent-kyc')
+  async submitTalentKYC(@CurrentUser('id') userId: string, @Body() data: any) {
+    return this.verificationService.submitTalentKYC(userId, data);
+  }
+
+  @ApiOperation({ summary: 'Skip onboarding verification for now' })
+  @UseGuards(JwtAuthGuard)
+  @Post('skip')
+  async skipVerification(@CurrentUser('id') userId: string) {
+    return this.verificationService.skipVerification(userId);
+  }
 }

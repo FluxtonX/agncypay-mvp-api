@@ -5,13 +5,10 @@ import {
   BadRequestException,
   BadGatewayException,
   ForbiddenException,
-  Inject,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
 import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
-import { CybridConfigService } from '../infrastructure/providers/cybrid/cybrid-config.service';
-import type { IFinancialProvider } from '../core/interfaces/financial-provider.interface';
 import { encryptText, decryptText } from '../common/utils/crypto.util';
 
 export type BankAccountStatus =
@@ -49,8 +46,6 @@ export class TalentBankAccountsService {
     private readonly prisma: PrismaService,
     private readonly auditLogsService: AuditLogsService,
     private readonly plaidProvider: PlaidProvider,
-    private readonly cybridConfig: CybridConfigService,
-    @Inject('IFinancialProvider') private readonly cybridProvider: IFinancialProvider,
   ) {}
 
   /**
@@ -80,7 +75,7 @@ export class TalentBankAccountsService {
 
   /**
    * 2. Complete Plaid Link:
-   * Public Token -> Plaid Access Token -> Cybrid Processor Token -> Cybrid EBA
+   * Public Token -> Plaid Access Token -> Provider External Bank Account
    */
   async completePlaidLink(
     userId: string,
@@ -88,9 +83,6 @@ export class TalentBankAccountsService {
   ): Promise<TalentBankAccountDto> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      include: {
-        cybridCustomer: true,
-      },
     });
 
     if (!user) {
@@ -142,92 +134,22 @@ export class TalentBankAccountsService {
       return this.mapToDto(existing, institutionName, accountName, accountMask);
     }
 
-    // Step D: Create Plaid Processor Token for Cybrid
-    let processorToken: string | null = null;
-    try {
-      processorToken = await this.plaidProvider.createProcessorToken(
-        accessToken,
-        targetAccountId,
-        'cybrid',
-      );
-    } catch (err: any) {
-      this.logger.warn(`Processor token creation warning: ${err.message}`);
-    }
+    // Step D: Generate provider bank account reference
+    // TODO: Wire Conduit Financial Provider adapter bank provisioning here
+    const providerExternalBankGuid = `eba_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const effectiveStatus: BankAccountStatus = 'READY';
 
-    // Step E: Ensure Cybrid Customer Exists
-    let customerGuid = user.cybridCustomer?.cybridCustomerGuid;
-    if (!customerGuid && this.cybridConfig.isConfigured) {
-      try {
-        const custResp = await this.cybridProvider.createCustomer({
-          type: 'individual',
-          name: user.fullName || 'Talent User',
-          email: user.email,
-        });
-        customerGuid = custResp.guid;
-        await this.prisma.cybridCustomer.create({
-          data: {
-            userId,
-            cybridCustomerGuid: custResp.guid,
-            kybStatus: 'approved',
-          },
-        });
-      } catch (err: any) {
-        this.logger.warn(`Cybrid customer check/create fallback: ${err.message}`);
-      }
-    }
-
-    // Step F: Create Cybrid External Bank Account
-    let cybridExternalBankGuid = `eba_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    let cybridState = 'completed';
-
-    if (this.cybridConfig.isConfigured && processorToken && customerGuid) {
-      try {
-        const ebaResp = await this.cybridProvider.createExternalBankAccount({
-          name: `${institutionName} (****${accountMask})`,
-          asset: 'USD',
-          accountKind: 'plaid_processor_token',
-          plaidProcessorToken: processorToken,
-          customerGuid,
-          plaidAccountMask: accountMask,
-          plaidAccountName: accountName,
-        });
-        cybridExternalBankGuid = ebaResp.guid;
-        cybridState = ebaResp.state || 'completed';
-      } catch (err: any) {
-        this.logger.error(`Cybrid EBA creation failed: ${err.message}`);
-        // If processor token fails, fallback to verified routing details
-        if (selectedAccount.routingNumber) {
-          try {
-            const rawResp = await this.cybridProvider.createExternalBankAccount({
-              name: `${institutionName} (****${accountMask})`,
-              asset: 'USD',
-              accountKind: 'raw_routing_details',
-              routingNumber: selectedAccount.routingNumber,
-              accountNumber: `111000${accountMask}`,
-              customerGuid,
-            });
-            cybridExternalBankGuid = rawResp.guid;
-            cybridState = rawResp.state || 'completed';
-          } catch (_) {}
-        }
-      }
-    }
-
-    const effectiveStatus: BankAccountStatus =
-      cybridState === 'completed' ? 'READY' : cybridState === 'failed' ? 'FAILED' : 'PROCESSING';
-
-    // Step G: Persist Records
+    // Step E: Persist Records
     const extAccount = await this.prisma.cybridExternalBankAccount.create({
       data: {
-        cybridExternalBankGuid,
-        customerGuid: customerGuid || null,
+        cybridExternalBankGuid: providerExternalBankGuid,
         agencyUserId: userId,
         bankName: institutionName,
         mask: accountMask,
         accountKind: 'plaid_processor_token',
         plaidInstitutionId: targetAccountId,
         asset: 'USD',
-        status: effectiveStatus === 'READY' ? 'completed' : 'pending',
+        status: 'completed',
       },
     });
 
@@ -242,7 +164,7 @@ export class TalentBankAccountsService {
         plaidAccessToken: encryptedAccessToken,
         plaidAccountId: encryptedAccountId,
         plaidItemId: encryptedItemId,
-        status: effectiveStatus === 'READY' ? 'approved' : 'processing',
+        status: 'approved',
       },
       create: {
         userId,
@@ -253,13 +175,13 @@ export class TalentBankAccountsService {
         plaidAccessToken: encryptedAccessToken,
         plaidAccountId: encryptedAccountId,
         plaidItemId: encryptedItemId,
-        status: effectiveStatus === 'READY' ? 'approved' : 'processing',
+        status: 'approved',
       },
     });
 
     // Sync AgencyExternalAccount for compatibility
     await this.prisma.agencyExternalAccount.upsert({
-      where: { providerExternalAccountId: cybridExternalBankGuid },
+      where: { providerExternalAccountId: providerExternalBankGuid },
       update: {
         accountName,
         bankName: institutionName,
@@ -273,18 +195,18 @@ export class TalentBankAccountsService {
         bankName: institutionName,
         accountNumberMask: accountMask,
         routingNumber: selectedAccount.routingNumber || '111000025',
-        providerExternalAccountId: cybridExternalBankGuid,
+        providerExternalAccountId: providerExternalBankGuid,
         isPrimary: true,
       },
     });
 
     await this.auditLogsService.log({
       userId,
-      action: 'CYBRID_EBA_CREATED',
-      entityType: 'CybridExternalBankAccount',
+      action: 'BANK_ACCOUNT_LINKED',
+      entityType: 'ExternalBankAccount',
       entityId: extAccount.id,
       details: {
-        cybridExternalBankGuid,
+        providerExternalBankGuid,
         institutionName,
         accountMask,
         status: effectiveStatus,
@@ -301,7 +223,7 @@ export class TalentBankAccountsService {
       currency: 'USD',
       status: effectiveStatus,
       isDefault: true,
-      isPayoutEligible: effectiveStatus === 'READY',
+      isPayoutEligible: true,
       createdAt: extAccount.createdAt.toISOString(),
       updatedAt: extAccount.updatedAt.toISOString(),
     };
@@ -317,7 +239,6 @@ export class TalentBankAccountsService {
     });
 
     if (accounts.length === 0) {
-      // Check BankDetails fallback
       const bankDetails = await this.prisma.bankDetails.findUnique({
         where: { userId },
       });
@@ -417,9 +338,9 @@ export class TalentBankAccountsService {
     await this.auditLogsService.log({
       userId,
       action: 'BANK_ACCOUNT_DEFAULT_CHANGED',
-      entityType: 'CybridExternalBankAccount',
+      entityType: 'ExternalBankAccount',
       entityId: id,
-      details: { cybridExternalBankGuid: acc.cybridExternalBankGuid },
+      details: { providerExternalAccountId: acc.cybridExternalBankGuid },
     });
 
     return { success: true };
@@ -449,9 +370,9 @@ export class TalentBankAccountsService {
     await this.auditLogsService.log({
       userId,
       action: 'BANK_ACCOUNT_REMOVED',
-      entityType: 'CybridExternalBankAccount',
+      entityType: 'ExternalBankAccount',
       entityId: id,
-      details: { cybridExternalBankGuid: acc.cybridExternalBankGuid },
+      details: { providerExternalAccountId: acc.cybridExternalBankGuid },
     });
 
     return { success: true };

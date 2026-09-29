@@ -1,17 +1,14 @@
-import { Controller, Get, Post, Body, Headers, Req, Query, HttpCode, HttpStatus, UseGuards, ForbiddenException } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
-import { CybridWebhookService } from './cybrid-webhook.service';
+import { Controller, Get, Post, Body, Headers, Query, Req, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PlaidWebhookService } from './plaid-webhook.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { ConfigService } from '@nestjs/config';
+import { ConduitWebhookService } from './conduit-webhook.service';
 
 @ApiTags('Webhooks')
 @Controller('webhooks')
 export class WebhooksController {
   constructor(
-    private readonly cybridWebhookService: CybridWebhookService,
     private readonly plaidWebhookService: PlaidWebhookService,
-    private readonly configService: ConfigService,
+    private readonly conduitWebhookService: ConduitWebhookService,
   ) {}
 
   @ApiOperation({ summary: 'Webhook endpoint health check' })
@@ -19,37 +16,7 @@ export class WebhooksController {
   @HttpCode(HttpStatus.OK)
   @Get('health')
   async healthCheck() {
-    return { status: 'online', service: 'AgncyPay Webhook Listener', plaid: 'active', cybrid: 'active' };
-  }
-
-  // ─── CYBRID WEBHOOKS ───────────────────────────────────────────
-
-  @ApiOperation({ summary: 'Cybrid Webhook ingestion endpoint' })
-  @ApiResponse({ status: 200, description: 'Webhook processed' })
-  @HttpCode(HttpStatus.OK)
-  @Post('cybrid')
-  async handleCybridWebhook(
-    @Req() req: any,
-    @Body() payload: any,
-    @Headers('x-cybrid-signature') signature?: string,
-  ) {
-    const rawBody = req?.rawBody ? req.rawBody.toString('utf8') : undefined;
-    return this.cybridWebhookService.processWebhookEvent(payload, signature, rawBody);
-  }
-
-  @ApiOperation({ summary: 'Simulate Cybrid Webhook for Testing and Development (Sandbox Only, Authenticated)' })
-  @ApiResponse({ status: 200, description: 'Simulated event processed' })
-  @ApiResponse({ status: 403, description: 'Forbidden in production' })
-  @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
-  @HttpCode(HttpStatus.OK)
-  @Post('cybrid/simulate')
-  async simulateCybridWebhook(@Body() payload: any) {
-    const env = this.configService.get<string>('CYBRID_ENVIRONMENT', 'sandbox');
-    if (env === 'production') {
-      throw new ForbiddenException('Webhook simulation is disabled in production');
-    }
-    return this.cybridWebhookService.processWebhookEvent(payload);
+    return { status: 'online', service: 'AgncyPay Webhook Listener', plaid: 'active' };
   }
 
   // ─── PLAID WEBHOOKS ────────────────────────────────────────────
@@ -95,5 +62,16 @@ export class WebhooksController {
   async getPlaidWebhookEvents(@Query('limit') limit?: string) {
     const parsedLimit = limit ? parseInt(limit, 10) : 25;
     return this.plaidWebhookService.getRecentEvents(parsedLimit);
+  }
+
+  @ApiOperation({ summary: 'Conduit Financial live webhook handler' })
+  @ApiResponse({ status: 200, description: 'Conduit webhook processed' })
+  @Post('conduit')
+  async handleConduitWebhook(
+    @Headers('x-conduit-signature') signature: string,
+    @Body() body: any,
+    @Req() req: any,
+  ) {
+    return this.conduitWebhookService.processWebhook(signature, body, req.rawBody);
   }
 }

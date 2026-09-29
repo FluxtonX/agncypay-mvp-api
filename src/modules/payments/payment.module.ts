@@ -5,8 +5,6 @@ import { PaymentStateService } from './payment-state.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuditLogsModule } from '../audit-logs/audit-logs.module';
 import { LedgerModule } from '../ledger/ledger.module';
-import { CybridCustomerService } from '../cybrid/cybrid-customer.service';
-import { CybridAccountService } from '../cybrid/cybrid-account.service';
 
 @Module({
   imports: [PrismaModule, AuditLogsModule, LedgerModule],
@@ -14,8 +12,7 @@ import { CybridAccountService } from '../cybrid/cybrid-account.service';
   providers: [
     PaymentService,
     PaymentStateService,
-    CybridCustomerService,
-    CybridAccountService,
+    // TODO: Add Conduit services when ConduitProvider is implemented
   ],
   exports: [PaymentService, PaymentStateService],
 })
