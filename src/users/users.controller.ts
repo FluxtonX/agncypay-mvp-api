@@ -19,8 +19,10 @@ export class UsersController {
 
   @ApiOperation({ summary: 'Update user profile details' })
   @Patch('me')
-  async updateMe(@CurrentUser('id') userId: string, @Body() data: { fullName?: string }) {
+  async updateMe(
+    @CurrentUser('id') userId: string,
+    @Body() data: { fullName?: string },
+  ) {
     return this.usersService.updateProfile(userId, data);
   }
 }
-

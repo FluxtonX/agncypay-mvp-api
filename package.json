@@ -12,7 +12,10 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node scripts/db-sync.js && node dist/src/main.js",
+    "start:prod": "prisma migrate deploy && node dist/src/main.js",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:migrate:status": "prisma migrate status",
+    "db:validate": "prisma validate",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -37,15 +40,12 @@
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
-    "intuit-oauth": "^4.2.5",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "passport-local": "^1.0.0",
     "plaid": "^45.0.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1",
-    "@nestjs/cli": "^11.0.0",
-    "typescript": "^5.7.3"
+    "rxjs": "^7.8.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
@@ -75,6 +75,10 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.2",
+    "js-yaml": "^5.4.2"
   },
   "jest": {
     "moduleFileExtensions": [

@@ -2,6 +2,8 @@ import { Controller, Get, Post, Body, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { FeatureFlagsService } from './feature-flags.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { AuthorizationGuard } from '../../auth/guards/authorization.guard';
+import { OrganizationRoles } from '../../auth/decorators/authorization.decorator';
 
 @ApiTags('Feature Flags')
 @Controller('feature-flags')
@@ -16,9 +18,16 @@ export class FeatureFlagsController {
 
   @ApiOperation({ summary: 'Set or update a feature flag (Protected)' })
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @OrganizationRoles('super_admin')
   @Post()
-  async setFlag(@Body() body: { key: string; enabled: boolean; description?: string }) {
-    return this.featureFlagsService.setFlag(body.key, body.enabled, body.description);
+  async setFlag(
+    @Body() body: { key: string; enabled: boolean; description?: string },
+  ) {
+    return this.featureFlagsService.setFlag(
+      body.key,
+      body.enabled,
+      body.description,
+    );
   }
 }

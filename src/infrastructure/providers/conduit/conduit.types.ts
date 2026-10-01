@@ -70,6 +70,8 @@ export interface ConduitOnboardingApplicationResponse {
 export interface ConduitVirtualAccountParams {
   customerId: string;
   asset?: string;
+  idempotencyKey?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ConduitVirtualAccount {
@@ -123,7 +125,8 @@ export interface ConduitPayoutParams {
 
 export interface ConduitPayoutResponse {
   id: string;
-  status: 'created' | 'pending' | 'processing' | 'settled' | 'completed' | 'failed';
+  status:
+    'created' | 'pending' | 'processing' | 'settled' | 'completed' | 'failed';
   amount: number;
   currency: string;
   reference?: string;

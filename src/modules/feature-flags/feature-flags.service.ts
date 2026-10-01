@@ -21,7 +21,11 @@ export class FeatureFlagsService {
     return result;
   }
 
-  async setFlag(key: string, enabled: boolean, description?: string): Promise<FeatureFlag> {
+  async setFlag(
+    key: string,
+    enabled: boolean,
+    description?: string,
+  ): Promise<FeatureFlag> {
     return this.featureFlagRepo.upsert(key, enabled, description);
   }
 }

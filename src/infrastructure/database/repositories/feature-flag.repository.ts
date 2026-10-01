@@ -18,7 +18,11 @@ export class FeatureFlagRepository {
     });
   }
 
-  async upsert(key: string, enabled: boolean, description?: string): Promise<FeatureFlag> {
+  async upsert(
+    key: string,
+    enabled: boolean,
+    description?: string,
+  ): Promise<FeatureFlag> {
     return this.prisma.featureFlag.upsert({
       where: { key },
       update: { enabled, description },

@@ -1,6 +1,17 @@
-import { Injectable, Logger, BadGatewayException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadGatewayException,
+  BadRequestException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Configuration, PlaidApi, PlaidEnvironments, Products, CountryCode } from 'plaid';
+import {
+  Configuration,
+  PlaidApi,
+  PlaidEnvironments,
+  Products,
+  CountryCode,
+} from 'plaid';
 import {
   IBankVerificationProvider,
   CreateLinkTokenResponse,
@@ -30,13 +41,17 @@ export class PlaidProvider implements IBankVerificationProvider {
       });
       this.client = new PlaidApi(configuration);
     } else {
-      this.logger.warn('Plaid credentials not provided. Plaid provider will fail-fast on API operations.');
+      this.logger.warn(
+        'Plaid credentials not provided. Plaid provider will fail-fast on API operations.',
+      );
     }
   }
 
   private ensureClient(): PlaidApi {
     if (!this.client) {
-      throw new BadGatewayException('Plaid credentials (PLAID_CLIENT_ID, PLAID_SECRET) are not configured in environment.');
+      throw new BadGatewayException(
+        'Plaid credentials (PLAID_CLIENT_ID, PLAID_SECRET) are not configured in environment.',
+      );
     }
     return this.client;
   }
@@ -45,7 +60,9 @@ export class PlaidProvider implements IBankVerificationProvider {
     const client = this.ensureClient();
 
     try {
-      const webhookUrl = this.configService.get<string>('PLAID_WEBHOOK_URL') || 'http://localhost:3001/api/v1/webhooks/plaid';
+      const webhookUrl =
+        this.configService.get<string>('PLAID_WEBHOOK_URL') ||
+        'http://localhost:3001/api/v1/webhooks/plaid';
       const linkParams: any = {
         user: { client_user_id: userId },
         client_name: 'AgncyPay',
@@ -67,7 +84,9 @@ export class PlaidProvider implements IBankVerificationProvider {
       };
     } catch (err: any) {
       this.logger.error(`Failed to create Plaid link token: ${err.message}`);
-      throw new BadGatewayException(`Plaid link token creation failed: ${err.message}`);
+      throw new BadGatewayException(
+        `Plaid link token creation failed: ${err.message}`,
+      );
     }
   }
 
@@ -80,12 +99,20 @@ export class PlaidProvider implements IBankVerificationProvider {
       });
       return response.data.public_token;
     } catch (err: any) {
-      this.logger.error(`Failed to create Plaid sandbox public token: ${err.message}`);
-      throw new BadGatewayException(`Plaid sandbox token creation failed: ${err.message}`);
+      this.logger.error(
+        `Failed to create Plaid sandbox public token: ${err.message}`,
+      );
+      throw new BadGatewayException(
+        `Plaid sandbox token creation failed: ${err.message}`,
+      );
     }
   }
 
-  async exchangePublicToken(request: ExchangePublicTokenRequest): Promise<{ accessToken: string; itemId: string; accounts: VerifiedBankAccount[] }> {
+  async exchangePublicToken(request: ExchangePublicTokenRequest): Promise<{
+    accessToken: string;
+    itemId: string;
+    accounts: VerifiedBankAccount[];
+  }> {
     const client = this.ensureClient();
 
     try {
@@ -108,69 +135,82 @@ export class PlaidProvider implements IBankVerificationProvider {
           institutionName = instRes.data.institution.name;
         }
       } catch (instErr: any) {
-        this.logger.warn(`Could not fetch institution name: ${instErr?.message}`);
+        this.logger.warn(
+          `Could not fetch institution name: ${instErr?.message}`,
+        );
       }
 
       const authResponse = await client.authGet({ access_token: accessToken });
-      const accounts: VerifiedBankAccount[] = authResponse.data.accounts.map((acc) => ({
-        accountId: acc.account_id,
-        bankName: institutionName,
-        accountName: acc.name,
-        accountNumberMask: acc.mask || 'XXXX',
-        routingNumber: authResponse.data.numbers.ach[0]?.routing || '111000025',
-        accountHolderName: acc.official_name || acc.name,
-        subtype: acc.subtype || 'checking',
-        type: acc.type || 'depository',
-        availableBalance: acc.balances.available ?? acc.balances.current ?? 0,
-        currentBalance: acc.balances.current ?? 0,
-        institutionName: institutionName,
-      }));
+      const accounts: VerifiedBankAccount[] = authResponse.data.accounts.map(
+        (acc) => {
+          const ach = authResponse.data.numbers.ach.find(
+            (number) => number.account_id === acc.account_id,
+          );
+          return {
+            accountId: acc.account_id,
+            bankName: institutionName,
+            accountName: acc.name,
+            accountNumberMask: acc.mask || 'XXXX',
+            accountNumber: ach?.account,
+            routingNumber: ach?.routing || '',
+            accountHolderName: acc.official_name || acc.name,
+            subtype: acc.subtype || 'checking',
+            type: acc.type || 'depository',
+            availableBalance:
+              acc.balances.available ?? acc.balances.current ?? 0,
+            currentBalance: acc.balances.current ?? 0,
+            institutionName,
+          };
+        },
+      );
 
       return { accessToken, itemId, accounts };
     } catch (err: any) {
-      this.logger.error(`Failed to exchange Plaid public token: ${err.message}`);
-      throw new BadGatewayException(`Plaid public token exchange failed: ${err.message}`);
+      this.logger.error(
+        `Failed to exchange Plaid public token: ${err.message}`,
+      );
+      throw new BadGatewayException(
+        `Plaid public token exchange failed: ${err.message}`,
+      );
     }
   }
 
-  async getAccountDetails(accessToken: string, accountId: string): Promise<VerifiedBankAccount> {
+  async getAccountDetails(
+    accessToken: string,
+    accountId: string,
+  ): Promise<VerifiedBankAccount> {
     const client = this.ensureClient();
 
     try {
       const authResponse = await client.authGet({ access_token: accessToken });
-      const acc = authResponse.data.accounts.find((a) => a.account_id === accountId);
+      const acc = authResponse.data.accounts.find(
+        (a) => a.account_id === accountId,
+      );
 
       if (!acc) {
-        throw new BadRequestException(`Plaid account ID ${accountId} not found in linked accounts`);
+        throw new BadRequestException(
+          `Plaid account ID ${accountId} not found in linked accounts`,
+        );
       }
 
       return {
         accountId: acc.account_id,
         bankName: acc.name || 'Bank Account',
         accountNumberMask: acc.mask || 'XXXX',
-        routingNumber: authResponse.data.numbers.ach[0]?.routing || '111000025',
+        accountNumber: authResponse.data.numbers.ach.find(
+          (number) => number.account_id === accountId,
+        )?.account,
+        routingNumber:
+          authResponse.data.numbers.ach.find(
+            (number) => number.account_id === accountId,
+          )?.routing || '',
         accountHolderName: acc.official_name || acc.name || 'Verified Holder',
       };
     } catch (err: any) {
       this.logger.error(`Failed to get Plaid account details: ${err.message}`);
-      throw new BadGatewayException(`Failed to retrieve Plaid account details: ${err.message}`);
-    }
-  }
-
-  async createProcessorToken(accessToken: string, accountId: string, processor = 'conduit'): Promise<string> {
-    const client = this.ensureClient();
-
-    try {
-      const response = await client.processorTokenCreate({
-        access_token: accessToken,
-        account_id: accountId,
-        processor: processor as any,
-      });
-
-      return response.data.processor_token;
-    } catch (err: any) {
-      this.logger.error(`Failed to create Plaid processor token for ${processor}: ${err.message}`);
-      throw new BadGatewayException(`Failed to create Plaid processor token for ${processor}: ${err.message}`);
+      throw new BadGatewayException(
+        `Failed to retrieve Plaid account details: ${err.message}`,
+      );
     }
   }
 }

@@ -17,6 +17,12 @@ describe('LedgerService', () => {
       aggregate: jest.fn(),
       findMany: jest.fn(),
     },
+    ledgerTransaction: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      count: jest.fn(),
+    },
+    ledgerPosting: { aggregate: jest.fn() },
   };
 
   const mockAuditLogsService = {
@@ -41,8 +47,16 @@ describe('LedgerService', () => {
 
   it('should post a valid double-entry journal entry', async () => {
     mockPrismaService.ledgerAccount.findUnique
-      .mockResolvedValueOnce({ id: 'acc-debit', accountCode: 'AGENCY:1:USD', accountType: 'asset' })
-      .mockResolvedValueOnce({ id: 'acc-credit', accountCode: 'CLEARING:USD', accountType: 'liability' });
+      .mockResolvedValueOnce({
+        id: 'acc-debit',
+        accountCode: 'AGENCY:1:USD',
+        accountType: 'asset',
+      })
+      .mockResolvedValueOnce({
+        id: 'acc-credit',
+        accountCode: 'CLEARING:USD',
+        accountType: 'liability',
+      });
 
     mockPrismaService.journalEntry.create.mockResolvedValue({
       id: 'je-1',
@@ -93,11 +107,56 @@ describe('LedgerService', () => {
 
     mockPrismaService.journalEntry.aggregate
       .mockResolvedValueOnce({ _sum: { amount: 1500 } }) // Debits
-      .mockResolvedValueOnce({ _sum: { amount: 500 } });  // Credits
+      .mockResolvedValueOnce({ _sum: { amount: 500 } }); // Credits
 
     const result = await service.getAccountBalance('AGENCY:1:USD');
     expect(result.debitTotal).toBe(1500);
     expect(result.creditTotal).toBe(500);
     expect(result.balance).toBe(1000); // 1500 - 500
+  });
+
+  it('posts only balanced canonical transactions', async () => {
+    mockPrismaService.ledgerTransaction.findUnique.mockResolvedValue(null);
+    mockPrismaService.ledgerTransaction.create.mockImplementation(
+      ({ data }) => ({
+        id: 'canonical-1',
+        ...data,
+        postings: data.postings.create,
+      }),
+    );
+
+    const transaction = await service.postCanonicalTransaction({
+      transactionType: 'talent_balance_funding',
+      currency: 'USD',
+      idempotencyKey: 'instruction-1',
+      referenceType: 'PAYMENT_INSTRUCTION',
+      postings: [
+        { accountId: 'cash', side: 'debit', amount: '25.50', currency: 'USD' },
+        {
+          accountId: 'talent',
+          side: 'credit',
+          amount: '25.50',
+          currency: 'USD',
+        },
+      ],
+    });
+
+    expect(transaction.postings).toHaveLength(2);
+    expect(mockPrismaService.ledgerTransaction.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an unbalanced canonical transaction', async () => {
+    await expect(
+      service.postCanonicalTransaction({
+        transactionType: 'invalid',
+        currency: 'USD',
+        idempotencyKey: 'invalid-1',
+        referenceType: 'TEST',
+        postings: [
+          { accountId: 'cash', side: 'debit', amount: 10, currency: 'USD' },
+          { accountId: 'talent', side: 'credit', amount: 9, currency: 'USD' },
+        ],
+      }),
+    ).rejects.toThrow(BadRequestException);
   });
 });

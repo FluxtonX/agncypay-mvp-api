@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -6,7 +6,10 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UserRepository } from '../infrastructure/database/repositories/user.repository';
+import { AuthorizationGuard } from './guards/authorization.guard';
+import { InvitationService } from './invitation.service';
 
+@Global()
 @Module({
   imports: [
     PassportModule,
@@ -14,16 +17,24 @@ import { UserRepository } from '../infrastructure/database/repositories/user.rep
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
-        secret: configService.get<string>('JWT_SECRET') || 'agncypay-jwt-secret-change-in-production',
+        secret:
+          configService.get<string>('JWT_SECRET') ||
+          'agncypay-jwt-secret-change-in-production',
         signOptions: {
-          expiresIn: (configService.get<string>('JWT_EXPIRATION') || '15m') as any,
+          expiresIn: (configService.get<string>('JWT_EXPIRATION') ||
+            '15m') as any,
         },
       }),
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, UserRepository],
-  exports: [AuthService],
+  providers: [
+    AuthService,
+    JwtStrategy,
+    UserRepository,
+    AuthorizationGuard,
+    InvitationService,
+  ],
+  exports: [AuthService, AuthorizationGuard, InvitationService],
 })
 export class AuthModule {}
-

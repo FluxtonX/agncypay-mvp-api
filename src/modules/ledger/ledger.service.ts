@@ -1,8 +1,19 @@
-import { Injectable, BadRequestException, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { JournalEntry, LedgerAccount, Prisma } from '@prisma/client';
-import { toDecimal, toNumber, subDecimals, addDecimals, isLessThanDecimal } from '../../common/utils/decimal.util';
+import {
+  toDecimal,
+  toNumber,
+  subDecimals,
+  addDecimals,
+  isLessThanDecimal,
+} from '../../common/utils/decimal.util';
 
 export interface PostJournalEntryParams {
   debitAccountCode: string;
@@ -22,6 +33,25 @@ export interface StatementOptions {
   limit?: number;
 }
 
+export interface CanonicalPostingInput {
+  accountId: string;
+  side: 'debit' | 'credit';
+  amount: number | string | Prisma.Decimal;
+  currency: string;
+}
+
+export interface PostCanonicalTransactionParams {
+  transactionType: string;
+  currency: string;
+  idempotencyKey: string;
+  referenceType: string;
+  referenceId?: string;
+  paymentInstructionId?: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+  postings: CanonicalPostingInput[];
+}
+
 @Injectable()
 export class LedgerService {
   private readonly logger = new Logger(LedgerService.name);
@@ -30,6 +60,86 @@ export class LedgerService {
     private readonly prisma: PrismaService,
     private readonly auditLogsService: AuditLogsService,
   ) {}
+
+  async postCanonicalTransaction(
+    params: PostCanonicalTransactionParams,
+    client: Prisma.TransactionClient | PrismaService = this.prisma,
+  ) {
+    const currency = params.currency.toUpperCase();
+    if (!/^[A-Z]{3}$/.test(currency))
+      throw new BadRequestException('Invalid ledger currency');
+    if (params.postings.length < 2)
+      throw new BadRequestException(
+        'At least two ledger postings are required',
+      );
+    let debits = new Prisma.Decimal(0);
+    let credits = new Prisma.Decimal(0);
+    const postings = params.postings.map((posting) => {
+      const amount = toDecimal(posting.amount);
+      if (!amount.isPositive())
+        throw new BadRequestException(
+          'Ledger posting amounts must be positive',
+        );
+      if (posting.currency.toUpperCase() !== currency) {
+        throw new BadRequestException(
+          'All postings must use the transaction currency',
+        );
+      }
+      if (posting.side === 'debit') debits = debits.add(amount);
+      else credits = credits.add(amount);
+      return { ...posting, amount, currency };
+    });
+    if (!debits.equals(credits)) {
+      throw new BadRequestException(
+        `Unbalanced ledger transaction: debits ${debits} != credits ${credits}`,
+      );
+    }
+    const existing = await client.ledgerTransaction.findUnique({
+      where: { idempotencyKey: params.idempotencyKey },
+      include: { postings: true },
+    });
+    if (existing) return existing;
+    return client.ledgerTransaction.create({
+      data: {
+        transactionType: params.transactionType,
+        status: 'posted',
+        currency,
+        idempotencyKey: params.idempotencyKey,
+        referenceType: params.referenceType,
+        referenceId: params.referenceId,
+        paymentInstructionId: params.paymentInstructionId,
+        description: params.description || '',
+        metadata: (params.metadata || {}) as Prisma.InputJsonValue,
+        postedAt: new Date(),
+        postings: { create: postings },
+      },
+      include: { postings: true },
+    });
+  }
+
+  async getCanonicalTrialBalance() {
+    const [debits, credits, transactions] = await Promise.all([
+      this.prisma.ledgerPosting.aggregate({
+        where: { side: 'debit', transaction: { status: 'posted' } },
+        _sum: { amount: true },
+      }),
+      this.prisma.ledgerPosting.aggregate({
+        where: { side: 'credit', transaction: { status: 'posted' } },
+        _sum: { amount: true },
+      }),
+      this.prisma.ledgerTransaction.count({ where: { status: 'posted' } }),
+    ]);
+    const totalDebits = toDecimal(debits._sum.amount);
+    const totalCredits = toDecimal(credits._sum.amount);
+    const discrepancy = totalDebits.sub(totalCredits);
+    return {
+      totalDebits: totalDebits.toString(),
+      totalCredits: totalCredits.toString(),
+      isBalanced: discrepancy.isZero(),
+      discrepancy: discrepancy.toString(),
+      postedTransactions: transactions,
+    };
+  }
 
   /**
    * Automatically classifies an account code based on standard Chart of Accounts rules.
@@ -43,7 +153,8 @@ export class LedgerService {
     const prefix = parts[0];
     const suffix = parts[parts.length - 1];
 
-    const currency = suffix === 'USDC_TRADING' ? 'USDC' : suffix === 'USD' ? 'USD' : 'USD';
+    const currency =
+      suffix === 'USDC_TRADING' ? 'USDC' : suffix === 'USD' ? 'USD' : 'USD';
 
     if (prefix === 'CLEARING') {
       return { accountType: 'asset', ownerType: 'system', currency };
@@ -79,8 +190,14 @@ export class LedgerService {
 
     const classification = this.getAccountClassification(params.accountCode);
     const parts = params.accountCode.split(':');
-    const isClearingAccount = parts[0] === 'CLEARING' || parts[1] === 'FEE' || parts[1] === 'INBOUND_DEPOSIT' || parts[1] === 'OUTBOUND_PAYOUT' || parts[1] === 'OUTBOUND_CLEARING';
-    const derivedOwnerId = parts.length >= 2 && !isClearingAccount ? parts[1] : undefined;
+    const isClearingAccount =
+      parts[0] === 'CLEARING' ||
+      parts[1] === 'FEE' ||
+      parts[1] === 'INBOUND_DEPOSIT' ||
+      parts[1] === 'OUTBOUND_PAYOUT' ||
+      parts[1] === 'OUTBOUND_CLEARING';
+    const derivedOwnerId =
+      parts.length >= 2 && !isClearingAccount ? parts[1] : undefined;
 
     return this.prisma.ledgerAccount.create({
       data: {
@@ -94,14 +211,20 @@ export class LedgerService {
     });
   }
 
-  async postJournalEntry(params: PostJournalEntryParams): Promise<JournalEntry> {
+  async postJournalEntry(
+    params: PostJournalEntryParams,
+  ): Promise<JournalEntry> {
     const decAmount = toDecimal(params.amount);
     if (decAmount.lessThanOrEqualTo(0)) {
-      throw new BadRequestException('Journal entry amount must be strictly greater than 0');
+      throw new BadRequestException(
+        'Journal entry amount must be strictly greater than 0',
+      );
     }
 
     if (params.debitAccountCode === params.creditAccountCode) {
-      throw new BadRequestException('Debit and credit accounts must be distinct in double-entry bookkeeping');
+      throw new BadRequestException(
+        'Debit and credit accounts must be distinct in double-entry bookkeeping',
+      );
     }
 
     // Ensure both accounts exist in Chart of Accounts
@@ -163,7 +286,13 @@ export class LedgerService {
 
     if (!account) {
       const classification = this.getAccountClassification(accountCode);
-      return { accountCode, debitTotal: 0, creditTotal: 0, balance: 0, currency: classification.currency };
+      return {
+        accountCode,
+        debitTotal: 0,
+        creditTotal: 0,
+        balance: 0,
+        currency: classification.currency,
+      };
     }
 
     const debits = await this.prisma.journalEntry.aggregate({
@@ -181,8 +310,12 @@ export class LedgerService {
 
     // For asset and expense accounts: normal balance is Debit (Debits - Credits)
     // For liability, equity, and revenue accounts: normal balance is Credit (Credits - Debits)
-    const isNormalDebit = ['asset', 'expense'].includes(account.accountType.toLowerCase());
-    const balanceDec = isNormalDebit ? subDecimals(debitDec, creditDec) : subDecimals(creditDec, debitDec);
+    const isNormalDebit = ['asset', 'expense'].includes(
+      account.accountType.toLowerCase(),
+    );
+    const balanceDec = isNormalDebit
+      ? subDecimals(debitDec, creditDec)
+      : subDecimals(creditDec, debitDec);
 
     return {
       accountCode,
@@ -196,7 +329,10 @@ export class LedgerService {
   /**
    * Pre-flight balance assertion. Throws BadRequestException if balance is insufficient.
    */
-  async assertSufficientBalance(accountCode: string, requiredAmount: number | Prisma.Decimal): Promise<number> {
+  async assertSufficientBalance(
+    accountCode: string,
+    requiredAmount: number | Prisma.Decimal,
+  ): Promise<number> {
     const reqDec = toDecimal(requiredAmount);
     const current = await this.getAccountBalance(accountCode);
 
@@ -251,7 +387,9 @@ export class LedgerService {
 
   async getJournalHistory(accountCode?: string, limit = 50): Promise<any[]> {
     if (accountCode) {
-      const account = await this.prisma.ledgerAccount.findUnique({ where: { accountCode } });
+      const account = await this.prisma.ledgerAccount.findUnique({
+        where: { accountCode },
+      });
       if (!account) return [];
 
       return this.prisma.journalEntry.findMany({
@@ -273,7 +411,9 @@ export class LedgerService {
    * Generates a time-range filtered ledger statement with transaction details.
    */
   async getStatement(accountCode: string, options: StatementOptions = {}) {
-    const account = await this.prisma.ledgerAccount.findUnique({ where: { accountCode } });
+    const account = await this.prisma.ledgerAccount.findUnique({
+      where: { accountCode },
+    });
     if (!account) {
       throw new NotFoundException(`Ledger account ${accountCode} not found`);
     }

@@ -1,277 +1,436 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+} from '@nestjs/common';
+import { PaymentInstructionStatus, Prisma } from '@prisma/client';
+import * as crypto from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { LedgerService } from '../modules/ledger/ledger.service';
-import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
-import { PayoutStateService } from '../modules/payouts/payout-state.service';
-import { PayoutsService } from '../payouts/payouts.service';
-import { ConduitProvider } from '../infrastructure/providers/conduit/conduit.provider';
-import { toDecimal } from '../common/utils/decimal.util';
+import { PAYMENT_PROVIDER } from '../core/interfaces/payment-provider.interface';
+import type { PaymentProvider } from '../core/interfaces/payment-provider.interface';
+import { PaymentOrchestrationService } from '../modules/payment-orchestration/payment-orchestration.service';
+import { PaymentService } from '../modules/payments/payment.service';
+import { TalentBalancesService } from '../modules/talent-balances/talent-balances.service';
 
 @Injectable()
 export class ConduitWebhookService {
-  private readonly logger = new Logger(ConduitWebhookService.name);
-
   constructor(
     private readonly prisma: PrismaService,
-    private readonly ledgerService: LedgerService,
-    private readonly auditLogsService: AuditLogsService,
-    private readonly payoutStateService: PayoutStateService,
-    private readonly payoutsService: PayoutsService,
-    private readonly conduitProvider: ConduitProvider,
+    private readonly orchestration: PaymentOrchestrationService,
+    private readonly payments: PaymentService,
+    private readonly talentBalances: TalentBalancesService,
+    @Inject(PAYMENT_PROVIDER) private readonly paymentProvider: PaymentProvider,
   ) {}
 
-  async processWebhook(signature: string | undefined, payload: any, rawBody?: Buffer | string) {
-    if (signature && rawBody && !this.conduitProvider.verifyWebhookSignature(signature, rawBody)) {
-      this.logger.error('Invalid Conduit webhook signature');
+  private canonicalJson(value: unknown): string {
+    if (Array.isArray(value))
+      return `[${value.map((item) => this.canonicalJson(item)).join(',')}]`;
+    if (value && typeof value === 'object') {
+      return `{${Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(
+          ([key, item]) => `${JSON.stringify(key)}:${this.canonicalJson(item)}`,
+        )
+        .join(',')}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  private hash(value: unknown) {
+    return crypto
+      .createHash('sha256')
+      .update(this.canonicalJson(value))
+      .digest('hex');
+  }
+
+  private async receive(
+    eventType: string,
+    payload: any,
+    suppliedEventId?: string,
+  ) {
+    const data = payload?.data || {};
+    const resourceId = data.id || data.transactionId || data.transaction_id;
+    const version =
+      data.updatedAt ||
+      data.updated_at ||
+      data.status ||
+      payload.version ||
+      '1';
+    const externalEventId =
+      suppliedEventId ||
+      payload.id ||
+      `${eventType}:${resourceId || 'unknown'}:${version}`;
+    const payloadHash = this.hash(payload);
+    const existing = await this.prisma.providerWebhookEvent.findUnique({
+      where: {
+        provider_externalEventId: {
+          provider: this.paymentProvider.name,
+          externalEventId,
+        },
+      },
+    });
+    if (existing) {
+      if (existing.payloadHash !== payloadHash) {
+        throw new ConflictException(
+          'Provider webhook event ID was reused with a different payload',
+        );
+      }
+      return { event: existing, duplicate: true };
+    }
+    const occurredAtValue =
+      data.updatedAt || data.updated_at || data.createdAt || data.created_at;
+    return {
+      event: await this.prisma.providerWebhookEvent.create({
+        data: {
+          provider: this.paymentProvider.name,
+          externalEventId,
+          eventType,
+          payloadHash,
+          payload,
+          occurredAt: occurredAtValue ? new Date(occurredAtValue) : undefined,
+        },
+      }),
+      duplicate: false,
+    };
+  }
+
+  async processWebhook(input: {
+    signature?: string;
+    timestamp?: string;
+    payload: any;
+    rawBody?: Buffer | string;
+    eventId?: string;
+  }) {
+    if (
+      !input.signature ||
+      !input.rawBody ||
+      !this.paymentProvider.verifyWebhookSignature(
+        input.signature,
+        input.rawBody,
+        input.timestamp,
+      )
+    ) {
       throw new BadRequestException('Invalid webhook signature');
     }
-
-    const event = payload?.event || payload?.type;
-    const data = payload?.data || {};
-
-    this.logger.log(`Received Conduit Webhook: ${event} (ID: ${data.id || payload.id})`);
-
-    switch (event) {
-      // ─── 1. Payout Settled / Completed ─────────────────────────────
-      case 'transfer.completed':
-      case 'payout.completed':
-      case 'payout.settled': {
-        const transferId = data.id || data.transfer_id || data.payout_id;
-        const payout = await this.prisma.paymentPayout.findFirst({
-          where: {
-            OR: [
-              transferId ? { conduitPayoutId: transferId } : undefined,
-              data.reference ? { payoutNumber: data.reference } : undefined,
-            ].filter(Boolean) as any,
-          },
-        });
-
-        if (payout) {
-          await this.payoutStateService.transition(payout.id, 'COMPLETED');
-          await this.prisma.paymentPayout.update({
-            where: { id: payout.id },
-            data: { status: 'COMPLETED' },
-          });
-
-          // Promote atomic pending reservation in double-entry ledger to posted
-          const refType =
-            payout.payoutType === 'domestic'
-              ? 'DOMESTIC_TALENT_PAYOUT'
-              : payout.payoutType === 'international'
-              ? 'FX_TRADE_RESERVATION'
-              : 'AGENCY_SELF_WITHDRAWAL';
-
-          await this.payoutsService.promotePendingToPosted(payout.id, refType, transferId);
-
-          await this.auditLogsService.log({
-            userId: payout.agencyId,
-            action: 'CONDUIT_PAYOUT_SETTLED',
-            entityType: 'PaymentPayout',
-            entityId: payout.id,
-            details: { transferId, payoutNumber: payout.payoutNumber, amount: payout.amount },
-          });
-
-          this.logger.log(`Payout ${payout.payoutNumber} marked COMPLETED via Conduit webhook.`);
-        }
-        break;
-      }
-
-      // ─── 2. Payout Failed ──────────────────────────────────────────
-      case 'transfer.failed':
-      case 'payout.failed': {
-        const transferId = data.id || data.transfer_id || data.payout_id;
-        const payout = await this.prisma.paymentPayout.findFirst({
-          where: {
-            OR: [
-              transferId ? { conduitPayoutId: transferId } : undefined,
-              data.reference ? { payoutNumber: data.reference } : undefined,
-            ].filter(Boolean) as any,
-          },
-        });
-
-        if (payout) {
-          await this.payoutStateService.transition(payout.id, 'FAILED');
-          await this.prisma.paymentPayout.update({
-            where: { id: payout.id },
-            data: { status: 'FAILED' },
-          });
-
-          // Reverse pending reservation back to Agency available balance
-          const refType =
-            payout.payoutType === 'domestic'
-              ? 'DOMESTIC_TALENT_PAYOUT'
-              : payout.payoutType === 'international'
-              ? 'FX_TRADE_RESERVATION'
-              : 'AGENCY_SELF_WITHDRAWAL';
-
-          await this.payoutsService.reversePendingReservation(payout.id, refType);
-
-          await this.auditLogsService.log({
-            userId: payout.agencyId,
-            action: 'CONDUIT_PAYOUT_FAILED',
-            entityType: 'PaymentPayout',
-            entityId: payout.id,
-            details: { transferId, payoutNumber: payout.payoutNumber, reason: data.failure_reason },
-          });
-
-          this.logger.warn(`Payout ${payout.payoutNumber} marked FAILED via Conduit webhook: ${data.failure_reason}`);
-        }
-        break;
-      }
-
-      // ─── 3. Inbound Deposit into Conduit Virtual Account ───────────
-      case 'deposit.received':
-      case 'account.deposit':
-      case 'virtual_account.deposit': {
-        const vaId = data.virtualAccountId || data.virtual_account_id || data.virtual_account;
-        const accNum = data.accountNumber || data.account_number;
-        const amount = Number(data.amount || 0);
-
-        const virtualAccount = await this.prisma.conduitVirtualAccount.findFirst({
-          where: {
-            OR: [
-              vaId ? { virtualAccountId: vaId } : undefined,
-              accNum ? { accountNumber: accNum } : undefined,
-            ].filter(Boolean) as any,
-          },
-          include: {
-            conduitCustomer: {
-              include: { user: true },
-            },
-          },
-        });
-
-        if (virtualAccount && virtualAccount.conduitCustomer?.user && amount > 0) {
-          const user = virtualAccount.conduitCustomer.user;
-          const accountCode = user.accountType === 'brand' ? `BRAND:${user.id}:USD` : `AGENCY:${user.id}:USD`;
-
-          // Post Double-Entry Ledger Inbound Deposit
-          const debitAccount = await this.ledgerService.getOrCreateAccount({ accountCode: 'CLEARING:INBOUND_DEPOSIT:USD' });
-          const creditAccount = await this.ledgerService.getOrCreateAccount({ accountCode });
-
-          await this.prisma.journalEntry.create({
-            data: {
-              debitAccountId: debitAccount.id,
-              creditAccountId: creditAccount.id,
-              amount: toDecimal(amount),
-              currency: virtualAccount.currency || 'USD',
-              status: 'posted',
-              postedAt: new Date(),
-              referenceType: 'CONDUIT_VIRTUAL_ACCOUNT_DEPOSIT',
-              referenceId: data.id || `dep_${Date.now()}`,
-              description: `Conduit VA deposit of $${amount.toFixed(2)} to ${virtualAccount.bankName} (${virtualAccount.accountNumber?.slice(-4)})`,
-            },
-          });
-
-          await this.auditLogsService.log({
-            userId: user.id,
-            action: 'CONDUIT_DEPOSIT_CREDITED',
-            entityType: 'ConduitVirtualAccount',
-            entityId: virtualAccount.id,
-            details: { amount, accountCode, depositId: data.id },
-          });
-
-          this.logger.log(`Conduit Inbound Deposit $${amount} credited to ${accountCode}`);
-        }
-        break;
-      }
-
-      // ─── 4. KYB Onboarding Approved ────────────────────────────────
-      case 'onboarding.approved':
-      case 'application.approved':
-      case 'customer.verified': {
-        const appId = data.id || data.applicationId || data.application_id;
-        const customerId = data.customerId || data.customer_id;
-
-        const customer = await this.prisma.conduitCustomer.findFirst({
-          where: {
-            OR: [
-              appId ? { applicationId: appId } : undefined,
-              customerId ? { conduitCustomerId: customerId } : undefined,
-            ].filter(Boolean) as any,
-          },
-        });
-
-        if (customer) {
-          await this.prisma.conduitCustomer.update({
-            where: { id: customer.id },
-            data: { kybStatus: 'approved', status: 'active' },
-          });
-
-          await this.prisma.user.update({
-            where: { id: customer.userId },
-            data: { kybStatus: 'approved' },
-          });
-
-          // Ensure Virtual Account provisioned
-          const existingVa = await this.prisma.conduitVirtualAccount.findFirst({
-            where: { conduitCustomerId: customer.id },
-          });
-
-          if (!existingVa) {
-            try {
-              const vaData = await this.conduitProvider.createVirtualAccount({
-                customerId: customer.conduitCustomerId,
-                asset: 'USD',
-              });
-
-              await this.prisma.conduitVirtualAccount.create({
-                data: {
-                  conduitCustomerId: customer.id,
-                  virtualAccountId: vaData.id,
-                  currency: vaData.currency || 'USD',
-                  accountNumber: vaData.accountNumber,
-                  routingNumber: vaData.routingNumber,
-                  bankName: vaData.bankName,
-                  beneficiaryName: vaData.beneficiaryName,
-                  status: 'active',
-                },
-              });
-            } catch (err: any) {
-              this.logger.warn(`Conduit auto virtual account creation notice: ${err.message}`);
-            }
-          }
-
-          this.logger.log(`Customer ${customer.conduitCustomerId} / User ${customer.userId} KYB approved via webhook.`);
-        }
-        break;
-      }
-
-      // ─── 5. KYB Onboarding Rejected ────────────────────────────────
-      case 'onboarding.rejected':
-      case 'application.rejected': {
-        const appId = data.id || data.applicationId || data.application_id;
-        const customerId = data.customerId || data.customer_id;
-
-        const customer = await this.prisma.conduitCustomer.findFirst({
-          where: {
-            OR: [
-              appId ? { applicationId: appId } : undefined,
-              customerId ? { conduitCustomerId: customerId } : undefined,
-            ].filter(Boolean) as any,
-          },
-        });
-
-        if (customer) {
-          await this.prisma.conduitCustomer.update({
-            where: { id: customer.id },
-            data: { kybStatus: 'rejected', status: 'suspended' },
-          });
-
-          await this.prisma.user.update({
-            where: { id: customer.userId },
-            data: { kybStatus: 'rejected' },
-          });
-
-          this.logger.warn(`Customer ${customer.conduitCustomerId} / User ${customer.userId} KYB rejected via webhook.`);
-        }
-        break;
-      }
-
-      default:
-        this.logger.debug(`Unhandled Conduit webhook event: ${event}`);
+    const eventType = String(input.payload?.event || input.payload?.type || '');
+    if (!eventType)
+      throw new BadRequestException('Provider webhook event type is required');
+    const received = await this.receive(
+      eventType,
+      input.payload,
+      input.eventId,
+    );
+    if (
+      received.duplicate &&
+      ['processed', 'ignored'].includes(received.event.status)
+    ) {
+      return {
+        received: true,
+        duplicate: true,
+        eventId: received.event.id,
+        status: received.event.status,
+      };
     }
+    const claimed = await this.prisma.providerWebhookEvent.updateMany({
+      where: { id: received.event.id, status: { in: ['received', 'failed'] } },
+      data: { status: 'processing', attempts: { increment: 1 }, error: null },
+    });
+    if (claimed.count !== 1) {
+      return {
+        received: true,
+        duplicate: true,
+        eventId: received.event.id,
+        status: 'processing',
+      };
+    }
+    try {
+      const processed = await this.synchronize(
+        eventType,
+        input.payload?.data || {},
+      );
+      await this.prisma.providerWebhookEvent.update({
+        where: { id: received.event.id },
+        data: {
+          status: processed ? 'processed' : 'ignored',
+          processedAt: new Date(),
+        },
+      });
+      return {
+        received: true,
+        duplicate: false,
+        eventId: received.event.id,
+        status: processed ? 'processed' : 'ignored',
+      };
+    } catch (error: any) {
+      await this.prisma.providerWebhookEvent.update({
+        where: { id: received.event.id },
+        data: {
+          status: 'failed',
+          error: String(error?.message || error).slice(0, 2000),
+        },
+      });
+      throw error;
+    }
+  }
 
-    return { received: true, event };
+  private async findAttempt(data: any) {
+    const externalReference =
+      data.id || data.transactionId || data.transaction_id;
+    if (externalReference) {
+      const byExternal = await this.prisma.paymentAttempt.findFirst({
+        where: {
+          provider: this.paymentProvider.name,
+          externalReference: String(externalReference),
+        },
+        include: { instruction: true },
+      });
+      if (byExternal) return byExternal;
+    }
+    const instructionId = data.reference || data.metadata?.paymentInstructionId;
+    if (!instructionId) return null;
+    return this.prisma.paymentAttempt.findFirst({
+      where: {
+        provider: this.paymentProvider.name,
+        instructionId: String(instructionId),
+        status: { in: ['submitted', 'accepted', 'unknown'] },
+      },
+      include: { instruction: true },
+      orderBy: { attemptNumber: 'desc' },
+    });
+  }
+
+  private async synchronize(eventType: string, data: any) {
+    if (eventType.startsWith('customer.')) {
+      return this.synchronizeCustomer(eventType, data);
+    }
+    if (!eventType.startsWith('transaction.')) return false;
+    const attempt = await this.findAttempt(data);
+    if (!attempt) {
+      await this.recordIssue({
+        dedupeKey: `webhook-missing-attempt:${this.paymentProvider.name}:${data.id || eventType}`,
+        reconciliationType: 'provider_webhook',
+        entityType: 'payment_attempt',
+        providerState: eventType,
+        discrepancyType: 'missing_internal',
+        provider: this.paymentProvider.name,
+        externalReference: data.id,
+        notes:
+          'Verified provider transaction event could not be mapped to an internal attempt',
+      });
+      return false;
+    }
+    const terminalSuccess =
+      eventType === 'transaction.completed' ||
+      eventType.endsWith('.payment_processed') ||
+      eventType.endsWith('.settlement_processed') ||
+      eventType.endsWith('.withdrawal_processed');
+    const terminalFailure =
+      eventType === 'transaction.cancelled' ||
+      eventType === 'transaction.failed' ||
+      eventType === 'transaction.compliance_rejected';
+    if (terminalSuccess) {
+      await this.settleAttempt(attempt, data);
+    } else if (terminalFailure) {
+      await this.failAttempt(
+        attempt,
+        data.failureReason || data.failure_reason || eventType,
+      );
+    } else {
+      await this.markProcessing(attempt);
+    }
+    return true;
+  }
+
+  private async markProcessing(attempt: any) {
+    if (attempt.status === 'submitted') {
+      await this.orchestration.transitionAttempt(attempt.id, 'accepted', {
+        externalReference: attempt.externalReference,
+      });
+    }
+    if (attempt.instruction.status === 'submitted') {
+      await this.orchestration.transitionInstruction(
+        attempt.instructionId,
+        'processing',
+        {
+          reason: 'Payment provider reported transaction processing',
+        },
+      );
+    }
+  }
+
+  private async settleAttempt(attempt: any, data: any) {
+    const externalReference = String(
+      data.id ||
+        data.transactionId ||
+        data.transaction_id ||
+        attempt.externalReference ||
+        '',
+    );
+    if (!externalReference)
+      throw new BadRequestException(
+        'Settled provider transaction has no reference',
+      );
+    if (attempt.status !== 'settled') {
+      await this.orchestration.transitionAttempt(attempt.id, 'settled', {
+        externalReference,
+        responsePayload: data,
+      });
+    }
+    if (attempt.operationType === 'inbound_funding') {
+      const amount = data.source?.amount ?? data.amount;
+      const currency = data.source?.asset ?? data.currency;
+      if (amount == null || !currency) {
+        throw new BadRequestException(
+          'Inbound funding webhook is missing amount or currency',
+        );
+      }
+      await this.payments.settleInboundFunding(attempt.instructionId, {
+        providerReference: externalReference,
+        amount,
+        currency,
+        rawPayload: data,
+      });
+      return;
+    }
+    if (attempt.operationType === 'talent_withdrawal') {
+      await this.talentBalances.settleWithdrawal(
+        attempt.instructionId,
+        externalReference,
+      );
+    } else if (attempt.operationType === 'fx_conversion') {
+      const conversion = await this.prisma.fxConversion.findUnique({
+        where: { paymentInstructionId: attempt.instructionId },
+        include: { quote: true },
+      });
+      if (!conversion)
+        throw new BadRequestException('FX conversion record not found');
+      await this.talentBalances.settleConversion(
+        attempt.instructionId,
+        conversion.quote.destinationAmount,
+        externalReference,
+      );
+      await this.prisma.$transaction([
+        this.prisma.fxConversion.update({
+          where: { id: conversion.id },
+          data: {
+            status: 'settled',
+            providerConversionId: externalReference,
+            providerResponse: data as Prisma.InputJsonValue,
+            settledAt: new Date(),
+          },
+        }),
+        this.prisma.fxQuote.update({
+          where: { id: conversion.quoteId },
+          data: { status: 'consumed' },
+        }),
+      ]);
+    }
+    const instruction = await this.prisma.paymentInstruction.findUnique({
+      where: { id: attempt.instructionId },
+    });
+    if (instruction && instruction.status !== 'settled') {
+      await this.orchestration.transitionInstruction(
+        instruction.id,
+        'settled',
+        {
+          reason: 'Payment provider reported transaction completed',
+          metadata: { providerReference: externalReference },
+        },
+      );
+    }
+  }
+
+  private async failAttempt(attempt: any, reason: string) {
+    if (!['failed', 'settled'].includes(attempt.status)) {
+      await this.orchestration.transitionAttempt(attempt.id, 'failed', {
+        errorCode: 'PROVIDER_TERMINAL_FAILURE',
+        errorMessage: reason,
+      });
+    }
+    if (attempt.operationType === 'talent_withdrawal') {
+      await this.talentBalances.releaseWithdrawal(
+        attempt.instructionId,
+        reason,
+      );
+    } else if (attempt.operationType === 'fx_conversion') {
+      await this.talentBalances.releaseConversion(
+        attempt.instructionId,
+        reason,
+      );
+      await this.prisma.fxConversion.updateMany({
+        where: {
+          paymentInstructionId: attempt.instructionId,
+          status: { not: 'settled' },
+        },
+        data: {
+          status: 'failed',
+          failureCode: 'PROVIDER_TERMINAL_FAILURE',
+          failureReason: reason,
+        },
+      });
+    }
+    const instruction = await this.prisma.paymentInstruction.findUnique({
+      where: { id: attempt.instructionId },
+    });
+    if (
+      instruction &&
+      !['failed', 'settled', 'cancelled'].includes(instruction.status)
+    ) {
+      await this.orchestration.transitionInstruction(
+        instruction.id,
+        'failed' as PaymentInstructionStatus,
+        { failureCode: 'PROVIDER_TERMINAL_FAILURE', reason },
+      );
+    }
+  }
+
+  private async synchronizeCustomer(eventType: string, data: any) {
+    const externalId = data.id || data.customerId || data.customer_id;
+    if (!externalId) return false;
+    const mapping = await this.prisma.providerPartyMap.findFirst({
+      where: {
+        provider: this.paymentProvider.name,
+        externalId: String(externalId),
+      },
+    });
+    if (!mapping) return false;
+    const status =
+      eventType === 'customer.active'
+        ? 'active'
+        : eventType === 'customer.compliance_rejected'
+          ? 'restricted'
+          : 'pending';
+    await this.prisma.providerPartyMap.update({
+      where: { id: mapping.id },
+      data: { status },
+    });
+    return true;
+  }
+
+  private recordIssue(data: {
+    dedupeKey: string;
+    reconciliationType: string;
+    entityType: string;
+    entityId?: string;
+    providerState?: string;
+    internalState?: string;
+    discrepancyType: string;
+    provider?: string;
+    externalReference?: string;
+    notes?: string;
+  }) {
+    return this.prisma.reconciliationRecord.upsert({
+      where: { dedupeKey: data.dedupeKey },
+      update: {
+        providerState: data.providerState,
+        internalState: data.internalState,
+        notes: data.notes,
+        lastCheckedAt: new Date(),
+        resolution: 'unresolved',
+        resolvedAt: null,
+      },
+      create: { ...data, lastCheckedAt: new Date() },
+    });
   }
 }

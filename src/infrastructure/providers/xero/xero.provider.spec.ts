@@ -14,8 +14,10 @@ describe('XeroProvider', () => {
           useValue: {
             get: jest.fn((key: string) => {
               if (key === 'XERO_CLIENT_ID') return 'test-xero-client-id';
-              if (key === 'XERO_CLIENT_SECRET') return 'test-xero-client-secret';
-              if (key === 'XERO_REDIRECT_URI') return 'http://localhost:3001/api/v1/integrations/xero/callback';
+              if (key === 'XERO_CLIENT_SECRET')
+                return 'test-xero-client-secret';
+              if (key === 'XERO_REDIRECT_URI')
+                return 'http://localhost:3001/api/v1/integrations/xero/callback';
               return null;
             }),
           },
@@ -25,6 +27,8 @@ describe('XeroProvider', () => {
 
     provider = module.get<XeroProvider>(XeroProvider);
   });
+
+  afterEach(() => jest.restoreAllMocks());
 
   it('should be defined', () => {
     expect(provider).toBeDefined();
@@ -37,26 +41,33 @@ describe('XeroProvider', () => {
     expect(url).toContain('offline_access');
   });
 
-  it('should handle simulated callback when no live credentials match or fetch fails', async () => {
-    const result = await provider.handleCallback('dummy-code');
-    expect(result).toBeDefined();
-    expect(result.accessToken).toBeDefined();
-    expect(result.refreshToken).toBeDefined();
-    expect(result.expiresAt).toBeDefined();
+  it('should surface token exchange failures instead of simulating credentials', async () => {
+    jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValueOnce(new Error('network unavailable'));
+    await expect(provider.handleCallback('dummy-code')).rejects.toThrow(
+      'Xero token exchange failed',
+    );
   });
 
-  it('should return mapped invoices in simulated mode', async () => {
-    const invoices = await provider.getInvoices('xero-access-simulated-123');
-    expect(Array.isArray(invoices)).toBe(true);
-    expect(invoices.length).toBeGreaterThan(0);
-    expect(invoices[0].id).toBeDefined();
-    expect(invoices[0].docNumber).toBeDefined();
+  it('should surface invoice synchronization failures', async () => {
+    jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValueOnce(new Error('network unavailable'));
+    await expect(
+      provider.getInvoices('access-token', 'tenant-1'),
+    ).rejects.toThrow('Xero invoice sync failed');
   });
 
-  it('should return payouts and vendors in simulated mode', async () => {
-    const payouts = await provider.getPayouts('xero-access-simulated-123');
-    const vendors = await provider.getVendors('xero-access-simulated-123');
-    expect(Array.isArray(payouts)).toBe(true);
-    expect(Array.isArray(vendors)).toBe(true);
+  it('should surface payment and contact synchronization failures', async () => {
+    jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(new Error('network unavailable'));
+    await expect(
+      provider.getPayouts('access-token', 'tenant-1'),
+    ).rejects.toThrow('Xero payment sync failed');
+    await expect(
+      provider.getVendors('access-token', 'tenant-1'),
+    ).rejects.toThrow('Xero contact sync failed');
   });
 });

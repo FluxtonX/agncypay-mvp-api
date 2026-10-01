@@ -1,8 +1,16 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(PrismaService.name);
 
   async onModuleInit() {
@@ -10,7 +18,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       await this.$connect();
       this.logger.log('Prisma connected to database successfully.');
     } catch (err: any) {
-      this.logger.error(`Prisma failed to connect to database: ${err.message}`, err.stack);
+      this.logger.error(
+        `Prisma failed to connect to database: ${err.message}`,
+        err.stack,
+      );
     }
   }
 
@@ -18,4 +29,3 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     await this.$disconnect();
   }
 }
-

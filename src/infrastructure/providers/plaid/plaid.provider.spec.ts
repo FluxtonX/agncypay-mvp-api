@@ -50,13 +50,10 @@ describe('PlaidProvider', () => {
             },
           ],
           numbers: {
-            ach: [{ account_id: 'acc_123', routing: '011401533', account: '0000' }],
+            ach: [
+              { account_id: 'acc_123', routing: '011401533', account: '0000' },
+            ],
           },
-        },
-      }),
-      processorTokenCreate: jest.fn().mockResolvedValue({
-        data: {
-          processor_token: 'processor-token-conduit-123',
         },
       }),
     };
@@ -74,17 +71,13 @@ describe('PlaidProvider', () => {
   });
 
   it('should exchange public token in test mode', async () => {
-    const res = await provider.exchangePublicToken({ userId: 'user-123', publicToken: 'public-sandbox-token' });
+    const res = await provider.exchangePublicToken({
+      userId: 'user-123',
+      publicToken: 'public-sandbox-token',
+    });
     expect(res).toBeDefined();
     expect(res.accessToken).toBe('access-sandbox-test-token');
     expect(res.itemId).toBe('item-test-id');
     expect(Array.isArray(res.accounts)).toBe(true);
   });
-
-  it('should create processor token for payment processor', async () => {
-    const token = await provider.createProcessorToken('access-sandbox-simulated-user-123', 'acc-123', 'conduit');
-    expect(token).toBeDefined();
-    expect(token).toBe('processor-token-conduit-123');
-  });
 });
-

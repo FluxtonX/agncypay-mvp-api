@@ -1,4 +1,10 @@
-import { Injectable, Logger, BadGatewayException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadGatewayException,
+  BadRequestException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import {
@@ -17,35 +23,75 @@ import {
   ConduitPayoutParams,
   ConduitPayoutResponse,
 } from './conduit.types';
+import {
+  PaymentProvider,
+  ProviderDepositAccountRequest,
+  ProviderDepositAccountResult,
+  ProviderOnboardingRequest,
+  ProviderOnboardingResult,
+  ProviderRecipientRequest,
+  ProviderRecipientResult,
+  ProviderTransferRequest,
+  ProviderTransferResult,
+  ProviderFxQuoteRequest,
+  ProviderFxQuoteResult,
+  ProviderFxConversionRequest,
+  ProviderFxConversionResult,
+} from '../../../core/interfaces/payment-provider.interface';
 
 @Injectable()
-export class ConduitProvider {
+export class ConduitProvider implements PaymentProvider {
+  readonly name = 'conduit';
   private readonly logger = new Logger(ConduitProvider.name);
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly webhookSecret: string;
+  private readonly apiSecret: string;
+  private readonly apiVersion: string;
 
   constructor(private readonly configService: ConfigService) {
     this.baseUrl = (
       this.configService.get<string>('CONDUIT_BASE_URL') ||
-      'https://api.sandbox.conduit.financial/v2'
+      'https://api.conduit.financial'
     ).replace(/\/$/, '');
     this.apiKey = this.configService.get<string>('CONDUIT_API_KEY') || '';
-    this.webhookSecret = this.configService.get<string>('CONDUIT_WEBHOOK_SECRET') || '';
+    this.apiSecret = this.configService.get<string>('CONDUIT_API_SECRET') || '';
+    this.apiVersion =
+      this.configService.get<string>('CONDUIT_API_VERSION') || '2024-12-01';
+    this.webhookSecret =
+      this.configService.get<string>('CONDUIT_WEBHOOK_SECRET') || '';
 
-    if (!this.apiKey) {
-      this.logger.warn('CONDUIT_API_KEY is not set. Outbound live calls will fail unless configured.');
+    if (!this.apiKey || !this.apiSecret) {
+      this.logger.warn(
+        'CONDUIT_API_KEY or CONDUIT_API_SECRET is not set. Outbound live calls will fail unless configured.',
+      );
     } else {
-      this.logger.log(`Conduit Live Sandbox Provider initialized targeting: ${this.baseUrl}`);
+      this.logger.log(
+        `Conduit Live Sandbox Provider initialized targeting: ${this.baseUrl}`,
+      );
+    }
+  }
+
+  isConfigured(): boolean {
+    return Boolean(this.apiKey && this.apiSecret);
+  }
+
+  private requireConfiguration(): void {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new ServiceUnavailableException(
+        'Conduit is not configured with both API key and secret. Set PAYMENT_PROVIDER=fake explicitly for local simulation.',
+      );
     }
   }
 
   private getHeaders(idempotencyKey?: string): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${this.apiKey}`,
+      Accept: 'application/json',
+      Authorization: `Bearer ${this.apiKey}`,
       'X-API-Key': this.apiKey,
+      'X-API-Secret': this.apiSecret,
+      'Api-Version': this.apiVersion,
     };
     if (idempotencyKey) {
       headers['Idempotency-Key'] = idempotencyKey;
@@ -53,7 +99,10 @@ export class ConduitProvider {
     return headers;
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit = {},
+  ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
     this.logger.debug(`Conduit API Request: ${options.method || 'GET'} ${url}`);
 
@@ -80,8 +129,8 @@ export class ConduitProvider {
         );
         throw new BadGatewayException(
           responseData?.message ||
-          responseData?.error ||
-          `Conduit API responded with status ${response.status}`,
+            responseData?.error ||
+            `Conduit API responded with status ${response.status}`,
         );
       }
 
@@ -91,7 +140,9 @@ export class ConduitProvider {
         throw err;
       }
       this.logger.error(`Conduit Network/Transport error: ${err.message}`);
-      throw new BadGatewayException(`Conduit Live Sandbox Connection Failed: ${err.message}`);
+      throw new BadGatewayException(
+        `Conduit Live Sandbox Connection Failed: ${err.message}`,
+      );
     }
   }
 
@@ -103,20 +154,54 @@ export class ConduitProvider {
       return {
         country: country.toUpperCase(),
         fields: [
-          { pointer: '/businessInfo/legalName', required: true, label: 'Legal Business Name' },
-          { pointer: '/businessInfo/taxId', required: true, label: 'Tax ID / EIN' },
-          { pointer: '/businessInfo/country', required: true, label: 'Country of Incorporation' },
-          { pointer: '/ownership/persons/0/firstName', required: true, label: 'Beneficial Owner First Name' },
-          { pointer: '/ownership/persons/0/lastName', required: true, label: 'Beneficial Owner Last Name' },
-          { pointer: '/ownership/persons/0/email', required: true, label: 'Beneficial Owner Email' },
+          {
+            pointer: '/businessInfo/legalName',
+            required: true,
+            label: 'Legal Business Name',
+          },
+          {
+            pointer: '/businessInfo/taxId',
+            required: true,
+            label: 'Tax ID / EIN',
+          },
+          {
+            pointer: '/businessInfo/country',
+            required: true,
+            label: 'Country of Incorporation',
+          },
+          {
+            pointer: '/ownership/persons/0/firstName',
+            required: true,
+            label: 'Beneficial Owner First Name',
+          },
+          {
+            pointer: '/ownership/persons/0/lastName',
+            required: true,
+            label: 'Beneficial Owner Last Name',
+          },
+          {
+            pointer: '/ownership/persons/0/email',
+            required: true,
+            label: 'Beneficial Owner Email',
+          },
         ],
         documents: [
-          { type: 'CERTIFICATE_OF_INCORPORATION', required: false, description: 'Articles of Organization or Incorporation' },
-          { type: 'PROOF_OF_ADDRESS', required: false, description: 'Bank Statement or Utility Bill' },
+          {
+            type: 'CERTIFICATE_OF_INCORPORATION',
+            required: false,
+            description: 'Articles of Organization or Incorporation',
+          },
+          {
+            type: 'PROOF_OF_ADDRESS',
+            required: false,
+            description: 'Bank Statement or Utility Bill',
+          },
         ],
       };
     }
-    return this.request<any>(`/onboarding/requirements?country=${encodeURIComponent(country)}`);
+    return this.request<any>(
+      `/onboarding/requirements?country=${encodeURIComponent(country)}`,
+    );
   }
 
   /**
@@ -125,17 +210,7 @@ export class ConduitProvider {
   async submitCustomerOnboarding(
     params: ConduitOnboardingApplicationParams,
   ): Promise<ConduitOnboardingApplicationResponse> {
-    if (!this.apiKey) {
-      const appId = `app_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const custId = `cust_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      return {
-        id: appId,
-        clientReferenceId: params.clientReferenceId,
-        status: 'approved',
-        customerId: custId,
-        createdAt: new Date().toISOString(),
-      };
-    }
+    this.requireConfiguration();
 
     return this.request<ConduitOnboardingApplicationResponse>('/onboarding', {
       method: 'POST',
@@ -146,17 +221,10 @@ export class ConduitProvider {
   /**
    * 3. Register or retrieve customer on Conduit rails
    */
-  async createCustomer(params: ConduitCustomerParams): Promise<ConduitCustomer> {
-    if (!this.apiKey) {
-      return {
-        id: `cust_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        name: params.name,
-        email: params.email,
-        type: params.type,
-        status: 'approved',
-        createdAt: new Date().toISOString(),
-      };
-    }
+  async createCustomer(
+    params: ConduitCustomerParams,
+  ): Promise<ConduitCustomer> {
+    this.requireConfiguration();
 
     return this.request<ConduitCustomer>('/customers', {
       method: 'POST',
@@ -172,91 +240,64 @@ export class ConduitProvider {
   }
 
   async getCustomer(customerId: string): Promise<ConduitCustomer> {
-    if (!this.apiKey) {
-      return {
-        id: customerId,
-        name: 'Demo Customer',
-        email: 'demo@agncypay.com',
-        type: 'business',
-        status: 'approved',
-        createdAt: new Date().toISOString(),
-      };
-    }
+    this.requireConfiguration();
     return this.request<ConduitCustomer>(`/customers/${customerId}`);
   }
 
   /**
    * 4. Provision dedicated Virtual Deposit Account (USD ACH/Fedwire)
    */
-  async createVirtualAccount(params: ConduitVirtualAccountParams): Promise<ConduitVirtualAccount> {
-    if (!this.apiKey) {
-      const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-      return {
-        id: `va_${Date.now()}_${randomSuffix}`,
-        customerId: params.customerId,
-        accountNumber: `4028${Math.floor(10000000 + Math.random() * 90000000)}`,
-        routingNumber: '021000021',
-        bankName: 'JPMorgan Chase (Conduit Settlement)',
-        beneficiaryName: 'AgncyPay FBO Client',
-        currency: params.asset || 'USD',
-        status: 'active',
-      };
-    }
+  async createVirtualAccount(
+    params: ConduitVirtualAccountParams,
+  ): Promise<ConduitVirtualAccount> {
+    this.requireConfiguration();
 
-    return this.request<ConduitVirtualAccount>(`/customers/${params.customerId}/features`, {
-      method: 'POST',
-      body: JSON.stringify({
-        feature: 'VIRTUAL_ACCOUNT',
-        asset: params.asset || 'USD',
-      }),
-    });
+    return this.request<ConduitVirtualAccount>(
+      `/customers/${params.customerId}/features`,
+      {
+        method: 'POST',
+        headers: params.idempotencyKey
+          ? { 'Idempotency-Key': params.idempotencyKey }
+          : {},
+        body: JSON.stringify({
+          feature: 'VIRTUAL_ACCOUNT',
+          asset: params.asset || 'USD',
+          metadata: params.metadata,
+        }),
+      },
+    );
   }
 
   async getVirtualAccount(customerId: string): Promise<ConduitVirtualAccount> {
-    if (!this.apiKey) {
-      return {
-        id: `va_${customerId}`,
-        customerId,
-        accountNumber: '402891823746',
-        routingNumber: '021000021',
-        bankName: 'JPMorgan Chase (Conduit Settlement)',
-        beneficiaryName: 'AgncyPay FBO Client',
-        currency: 'USD',
-        status: 'active',
-      };
-    }
-    return this.request<ConduitVirtualAccount>(`/customers/${customerId}/virtual-accounts`);
+    this.requireConfiguration();
+    return this.request<ConduitVirtualAccount>(
+      `/customers/${customerId}/virtual-accounts`,
+    );
   }
 
   /**
    * 5. Register a Whitelist Recipient / Beneficiary (Plaid to Conduit pipeline)
    */
-  async createRecipient(params: ConduitRecipientParams): Promise<ConduitRecipient> {
-    if (!this.apiKey) {
-      const recId = `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const mask = params.accountNumber?.slice(-4) || '6789';
-      return {
-        id: recId,
-        customerId: params.customerId,
-        name: params.name,
-        recipientType: params.type || 'individual',
-        status: 'active',
-        payoutRail: params.payoutRail || 'ach',
-        accountNumberMask: mask,
-        routingNumber: params.routingNumber || '021000021',
-        walletAddress: params.walletAddress,
-        createdAt: new Date().toISOString(),
-      };
-    }
-
-    return this.request<ConduitRecipient>('/whitelist-recipients', {
-      method: 'POST',
-      body: JSON.stringify(params),
-    });
+  async createRecipient(
+    params: ConduitRecipientParams | ProviderRecipientRequest,
+  ): Promise<ConduitRecipient & ProviderRecipientResult> {
+    this.requireConfiguration();
+    const customerId =
+      'customerId' in params ? params.customerId : params.partyId;
+    const result = await this.request<ConduitRecipient>(
+      '/whitelist-recipients',
+      {
+        method: 'POST',
+        body: JSON.stringify({ ...params, customerId }),
+      },
+    );
+    return { ...result, partyId: customerId };
   }
 
   // Alias for backward compatibility
-  async createBeneficiary(params: ConduitBeneficiaryParams): Promise<ConduitBeneficiary> {
+  async createBeneficiary(
+    params: ConduitBeneficiaryParams,
+  ): Promise<ConduitBeneficiary> {
     const res = await this.createRecipient({
       customerId: params.customerId,
       name: params.accountHolderName || 'Beneficiary',
@@ -273,27 +314,20 @@ export class ConduitProvider {
   /**
    * 6. Execute live payout transfer on Conduit Sandbox (POST /v2/payouts)
    */
-  async createPayout(params: ConduitPayoutParams): Promise<ConduitPayoutResponse> {
+  async createPayout(
+    params: ConduitPayoutParams,
+  ): Promise<ConduitPayoutResponse> {
     if (params.amount <= 0) {
       throw new BadRequestException('Payout amount must be strictly positive');
     }
 
-    if (!this.apiKey) {
-      const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      return {
-        id: payoutId,
-        status: 'completed',
-        amount: params.amount,
-        currency: params.currency || 'USD',
-        reference: params.reference,
-        createdAt: new Date().toISOString(),
-        settledAt: new Date().toISOString(),
-      };
-    }
+    this.requireConfiguration();
 
     return this.request<ConduitPayoutResponse>('/payouts', {
       method: 'POST',
-      headers: params.idempotencyKey ? { 'Idempotency-Key': params.idempotencyKey } : {},
+      headers: params.idempotencyKey
+        ? { 'Idempotency-Key': params.idempotencyKey }
+        : {},
       body: JSON.stringify({
         customerId: params.customerId,
         amount: params.amount,
@@ -308,34 +342,171 @@ export class ConduitProvider {
   }
 
   // Alias for transfer
-  async createTransfer(params: ConduitTransferParams): Promise<ConduitTransfer> {
-    return this.createPayout(params);
+  async createTransfer(
+    params: ConduitTransferParams | ProviderTransferRequest,
+  ): Promise<ProviderTransferResult> {
+    const normalized: ConduitPayoutParams =
+      'customerId' in params
+        ? params
+        : {
+            customerId: params.partyId,
+            recipientId: params.recipientId,
+            amount: params.amount,
+            currency: params.currency,
+            purpose: params.purpose,
+            reference: params.reference,
+            idempotencyKey: params.idempotencyKey,
+            metadata: params.metadata,
+          };
+    return this.createPayout(normalized) as Promise<ProviderTransferResult>;
   }
 
-  async getTransfer(transferId: string): Promise<ConduitTransfer> {
-    if (!this.apiKey) {
-      return {
-        id: transferId,
-        status: 'completed',
-        amount: 100,
-        currency: 'USD',
-        createdAt: new Date().toISOString(),
-        settledAt: new Date().toISOString(),
-      };
-    }
-    return this.request<ConduitTransfer>(`/payouts/${transferId}`);
+  async getTransfer(transferId: string): Promise<ProviderTransferResult> {
+    this.requireConfiguration();
+    return this.request<ProviderTransferResult>(`/payouts/${transferId}`);
+  }
+
+  async createFxQuote(
+    params: ProviderFxQuoteRequest,
+  ): Promise<ProviderFxQuoteResult> {
+    this.requireConfiguration();
+    const result = await this.request<any>('/quotes', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': params.idempotencyKey },
+      body: JSON.stringify({
+        source: {
+          asset: params.sourceCurrency,
+          amount: params.sourceAmount.toFixed(4),
+        },
+        target: { asset: params.destinationCurrency },
+        metadata: params.metadata,
+      }),
+    });
+    const sourceAmount = Number(result.source?.amount);
+    const destinationAmount = Number(result.target?.amount);
+    return {
+      id: result.id,
+      sourceCurrency: result.source?.asset,
+      destinationCurrency: result.target?.asset,
+      sourceAmount,
+      destinationAmount,
+      exchangeRate: destinationAmount / sourceAmount,
+      feeAmount: Number(result.pricing?.fees?.total?.amount || 0),
+      feeCurrency: result.pricing?.fees?.total?.asset || result.source?.asset,
+      expiresAt: result.expiresAt,
+      raw: result,
+    };
+  }
+
+  async executeFxConversion(
+    params: ProviderFxConversionRequest,
+  ): Promise<ProviderFxConversionResult> {
+    this.requireConfiguration();
+    const result = await this.request<any>('/transactions', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': params.idempotencyKey },
+      body: JSON.stringify({
+        type: 'conversion',
+        quote: params.quoteId,
+        source: params.sourceAccountId,
+        destination: params.destinationAccountId,
+        purpose: params.purpose || 'Other',
+        reference: params.reference,
+        metadata: params.metadata,
+      }),
+    });
+    return this.mapFxConversion(result);
+  }
+
+  async getFxConversion(
+    conversionId: string,
+  ): Promise<ProviderFxConversionResult> {
+    this.requireConfiguration();
+    return this.mapFxConversion(
+      await this.request<any>(`/transactions/${conversionId}`),
+    );
+  }
+
+  private mapFxConversion(result: any): ProviderFxConversionResult {
+    const states: Record<string, ProviderFxConversionResult['status']> = {
+      created: 'pending',
+      pending: 'pending',
+      processing: 'processing',
+      completed: 'completed',
+      settled: 'completed',
+      failed: 'failed',
+      returned: 'returned',
+      cancelled: 'cancelled',
+    };
+    return {
+      id: result.id,
+      status: states[result.status] || 'processing',
+      sourceCurrency: result.source?.asset,
+      destinationCurrency: result.destination?.asset || result.target?.asset,
+      sourceAmount: Number(result.source?.amount),
+      destinationAmount: Number(
+        result.destination?.amount || result.target?.amount,
+      ),
+      failureCode: result.failureCode || result.error?.code,
+      raw: result,
+    };
+  }
+
+  async submitOnboarding(
+    params: ProviderOnboardingRequest,
+  ): Promise<ProviderOnboardingResult> {
+    const result = await this.submitCustomerOnboarding(
+      params as unknown as ConduitOnboardingApplicationParams,
+    );
+    return { ...result } as ProviderOnboardingResult;
+  }
+
+  async createDepositAccount(
+    params: ProviderDepositAccountRequest,
+  ): Promise<ProviderDepositAccountResult> {
+    const result = await this.createVirtualAccount({
+      customerId: params.partyId,
+      asset: params.currency || 'USD',
+      idempotencyKey: params.idempotencyKey,
+      metadata: params.metadata,
+    });
+    return { ...result, partyId: result.customerId, currency: result.currency };
   }
 
   /**
    * 7. Webhook cryptographic HMAC-SHA256 signature verification (Conduit v2 specification)
    */
-  verifyWebhookSignature(signatureHeader: string, rawBody: Buffer | string): boolean {
+  verifyWebhookSignature(
+    signatureHeader: string,
+    rawBody: Buffer | string,
+    timestampHeader?: string,
+  ): boolean {
     if (!this.webhookSecret || !signatureHeader) {
-      return true; // Pass through in sandbox development if secret is not set
+      return false;
     }
 
     try {
-      const rawString = typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8');
+      const rawString =
+        typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8');
+      if (timestampHeader) {
+        const timestamp = Number(timestampHeader);
+        if (
+          !Number.isFinite(timestamp) ||
+          Math.abs(Math.floor(Date.now() / 1000) - timestamp) > 300
+        ) {
+          return false;
+        }
+        const expected = crypto
+          .createHmac('sha256', this.webhookSecret)
+          .update(`${timestampHeader}.${rawString}`)
+          .digest('hex');
+        const expectedBuffer = Buffer.from(expected, 'hex');
+        const signatureBuffer = Buffer.from(signatureHeader, 'hex');
+        return (
+          expectedBuffer.length === signatureBuffer.length &&
+          crypto.timingSafeEqual(expectedBuffer, signatureBuffer)
+        );
+      }
       const pairs = signatureHeader.split(',').map((p) => p.split('='));
       const t = pairs.find(([k]) => k === 't')?.[1];
       const signatures = pairs.filter(([k]) => k === 'v1').map(([, v]) => v);
@@ -348,13 +519,18 @@ export class ConduitProvider {
           .digest('hex');
         const compBuf = Buffer.from(computed, 'hex');
         const sigBuf = Buffer.from(signatureHeader, 'hex');
-        return compBuf.length === sigBuf.length && crypto.timingSafeEqual(sigBuf, compBuf);
+        return (
+          compBuf.length === sigBuf.length &&
+          crypto.timingSafeEqual(sigBuf, compBuf)
+        );
       }
 
       // Enforce 300-second replay window
       const tNum = parseInt(t, 10);
       if (Math.abs(Math.floor(Date.now() / 1000) - tNum) > 300) {
-        this.logger.warn('Conduit webhook rejected: replay window exceeded (>300s)');
+        this.logger.warn(
+          'Conduit webhook rejected: replay window exceeded (>300s)',
+        );
         return false;
       }
 
@@ -366,10 +542,15 @@ export class ConduitProvider {
       const expectedBuf = Buffer.from(expected, 'hex');
       return signatures.some((v1) => {
         const v1Buf = Buffer.from(v1, 'hex');
-        return expectedBuf.length === v1Buf.length && crypto.timingSafeEqual(expectedBuf, v1Buf);
+        return (
+          expectedBuf.length === v1Buf.length &&
+          crypto.timingSafeEqual(expectedBuf, v1Buf)
+        );
       });
     } catch (err: any) {
-      this.logger.warn(`Conduit webhook signature verification error: ${err.message}`);
+      this.logger.warn(
+        `Conduit webhook signature verification error: ${err.message}`,
+      );
       return false;
     }
   }

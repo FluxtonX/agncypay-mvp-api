@@ -1,4 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  BadGatewayException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   IAccountingIntegrationProvider,
@@ -22,62 +27,73 @@ export class XeroProvider implements IAccountingIntegrationProvider {
 
   constructor(private readonly configService: ConfigService) {
     this.clientId = this.configService.get<string>('XERO_CLIENT_ID') || null;
-    this.clientSecret = this.configService.get<string>('XERO_CLIENT_SECRET') || null;
+    this.clientSecret =
+      this.configService.get<string>('XERO_CLIENT_SECRET') || null;
     this.redirectUri =
       this.configService.get<string>('XERO_REDIRECT_URI') ||
       'http://localhost:3001/api/v1/integrations/xero/callback';
 
     if (!this.clientId || !this.clientSecret) {
-      this.logger.warn('Xero credentials not provided. Operating in simulated mode.');
+      this.logger.warn(
+        'Xero credentials not provided. Connector is unavailable.',
+      );
     }
   }
 
-  async getAuthUrl(): Promise<string> {
+  async getAuthUrl(state = ''): Promise<string> {
     if (!this.clientId || !this.clientSecret) {
-      return 'http://localhost:3000/dashboard/settings/integrations/xero?connected=xero&simulated=true';
+      throw new ServiceUnavailableException('Xero OAuth is not configured');
     }
 
-    const scope = encodeURIComponent('accounting.transactions.read accounting.contacts.read offline_access');
+    const scope = encodeURIComponent(
+      'accounting.transactions.read accounting.contacts.read offline_access',
+    );
     return `https://login.xero.com/identity/connect/authorize?response_type=code&client_id=${this.clientId}&redirect_uri=${encodeURIComponent(
       this.redirectUri,
-    )}&scope=${scope}&state=agncypay-xero-state`;
+    )}&scope=${scope}&state=${encodeURIComponent(state)}`;
   }
 
-  async handleCallback(code: string, tenantIdParam?: string): Promise<XeroTokenResult> {
+  async handleCallback(
+    code: string,
+    tenantIdParam?: string,
+  ): Promise<XeroTokenResult> {
     if (!this.clientId || !this.clientSecret) {
-      return {
-        accessToken: `xero-access-simulated-${Date.now()}`,
-        refreshToken: `xero-refresh-simulated-${Date.now()}`,
-        expiresAt: new Date(Date.now() + 3600 * 1000),
-        tenantId: tenantIdParam || 'xero-tenant-simulated-99',
-        tenantName: 'Simulated Xero Org',
-      };
+      throw new ServiceUnavailableException('Xero OAuth is not configured');
     }
 
     try {
-      const authHeader = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64');
-      const tokenResponse = await fetch('https://identity.xero.com/connect/token', {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${authHeader}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
+      const authHeader = Buffer.from(
+        `${this.clientId}:${this.clientSecret}`,
+      ).toString('base64');
+      const tokenResponse = await fetch(
+        'https://identity.xero.com/connect/token',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Basic ${authHeader}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: this.redirectUri,
+          }).toString(),
         },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: this.redirectUri,
-        }).toString(),
-      });
+      );
 
       if (!tokenResponse.ok) {
         const errorText = await tokenResponse.text();
-        throw new Error(`Token exchange failed (${tokenResponse.status}): ${errorText}`);
+        throw new Error(
+          `Token exchange failed (${tokenResponse.status}): ${errorText}`,
+        );
       }
 
       const token = await tokenResponse.json();
       const accessToken = token.access_token;
       const refreshToken = token.refresh_token;
-      const expiresAt = new Date(Date.now() + (token.expires_in || 1800) * 1000);
+      const expiresAt = new Date(
+        Date.now() + (token.expires_in || 1800) * 1000,
+      );
 
       // Query Xero Connections API to resolve tenantId and tenantName
       let tenantId = tenantIdParam;
@@ -98,7 +114,9 @@ export class XeroProvider implements IAccountingIntegrationProvider {
           }
         }
       } catch (connErr: any) {
-        this.logger.warn(`Failed to resolve Xero tenant connections: ${connErr.message}`);
+        this.logger.warn(
+          `Failed to resolve Xero tenant connections: ${connErr.message}`,
+        );
       }
 
       return {
@@ -109,28 +127,25 @@ export class XeroProvider implements IAccountingIntegrationProvider {
         tenantName,
       };
     } catch (err: any) {
-      this.logger.error(`Xero OAuth callback failed: ${err.message}`, err.stack);
-      return {
-        accessToken: `xero-access-simulated-${Date.now()}`,
-        refreshToken: `xero-refresh-simulated-${Date.now()}`,
-        expiresAt: new Date(Date.now() + 3600 * 1000),
-        tenantId: 'xero-tenant-simulated-99',
-        tenantName: 'Simulated Xero Org (Fallback)',
-      };
+      this.logger.error(
+        `Xero OAuth callback failed: ${err.message}`,
+        err.stack,
+      );
+      throw new BadGatewayException(
+        `Xero token exchange failed: ${err.message}`,
+      );
     }
   }
 
   async refreshAccessToken(refreshToken: string): Promise<XeroTokenResult> {
-    if (!this.clientId || !this.clientSecret || refreshToken.includes('simulated')) {
-      return {
-        accessToken: `xero-access-simulated-${Date.now()}`,
-        refreshToken: `xero-refresh-simulated-${Date.now()}`,
-        expiresAt: new Date(Date.now() + 3600 * 1000),
-      };
+    if (!this.clientId || !this.clientSecret) {
+      throw new ServiceUnavailableException('Xero OAuth is not configured');
     }
 
     try {
-      const authHeader = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64');
+      const authHeader = Buffer.from(
+        `${this.clientId}:${this.clientSecret}`,
+      ).toString('base64');
       const response = await fetch('https://identity.xero.com/connect/token', {
         method: 'POST',
         headers: {
@@ -159,36 +174,25 @@ export class XeroProvider implements IAccountingIntegrationProvider {
     }
   }
 
-  async getInvoices(accessToken: string, tenantId?: string): Promise<SyncedInvoice[]> {
-    if (!this.clientId || accessToken.includes('simulated')) {
-      return [
-        {
-          id: 'xero-inv-301',
-          docNumber: 'XERO-3001',
-          name: 'Warner Music Group (Xero Synced)',
-          amount: 22500,
-          dueDate: '2026-08-25',
-          status: 'pending',
-        },
-        {
-          id: 'xero-inv-302',
-          docNumber: 'XERO-3002',
-          name: 'Universal Music Global (Xero Synced)',
-          amount: 14800,
-          dueDate: '2026-08-10',
-          status: 'paid',
-        },
-      ];
+  async getInvoices(
+    accessToken: string,
+    tenantId?: string,
+  ): Promise<SyncedInvoice[]> {
+    if (!this.clientId) {
+      throw new ServiceUnavailableException('Xero connector is not configured');
     }
 
     try {
-      const response = await fetch('https://api.xero.com/api.xro/2.0/Invoices', {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'xero-tenant-id': tenantId || '',
-          Accept: 'application/json',
+      const response = await fetch(
+        'https://api.xero.com/api.xro/2.0/Invoices',
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'xero-tenant-id': tenantId || '',
+            Accept: 'application/json',
+          },
         },
-      });
+      );
 
       if (!response.ok) {
         throw new Error(`Xero API error HTTP ${response.status}`);
@@ -208,41 +212,26 @@ export class XeroProvider implements IAccountingIntegrationProvider {
       }));
     } catch (err: any) {
       this.logger.error(`Failed to fetch Xero invoices: ${err.message}`);
-      return [
-        {
-          id: 'xero-inv-301',
-          docNumber: 'XERO-3001',
-          name: 'Warner Music Group (Xero Synced)',
-          amount: 22500,
-          dueDate: '2026-08-25',
-          status: 'pending',
-        },
-      ];
+      throw new BadGatewayException(`Xero invoice sync failed: ${err.message}`);
     }
   }
 
   async getPayouts(accessToken: string, tenantId?: string): Promise<any[]> {
-    if (!this.clientId || accessToken.includes('simulated')) {
-      return [
-        {
-          id: 'xero-pay-1',
-          vendorName: 'Karlos Talent (Xero)',
-          description: 'Xero processed royalty payout',
-          amount: '$14,800.00',
-          paymentMethod: 'ACH',
-          status: 'Paid',
-        },
-      ];
+    if (!this.clientId) {
+      throw new ServiceUnavailableException('Xero connector is not configured');
     }
 
     try {
-      const response = await fetch('https://api.xero.com/api.xro/2.0/Payments', {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'xero-tenant-id': tenantId || '',
-          Accept: 'application/json',
+      const response = await fetch(
+        'https://api.xero.com/api.xro/2.0/Payments',
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'xero-tenant-id': tenantId || '',
+            Accept: 'application/json',
+          },
         },
-      });
+      );
 
       if (!response.ok) {
         throw new Error(`Xero Payments API HTTP ${response.status}`);
@@ -253,44 +242,41 @@ export class XeroProvider implements IAccountingIntegrationProvider {
 
       return payments.map((pay: any) => ({
         id: pay.PaymentID || `pay-${Date.now()}`,
-        vendorName: pay.Invoice?.Contact?.Name || pay.Account?.Name || 'Xero Payee',
-        description: pay.Reference || `Payment for ${pay.Invoice?.InvoiceNumber || 'Invoice'}`,
+        vendorName:
+          pay.Invoice?.Contact?.Name || pay.Account?.Name || 'Xero Payee',
+        description:
+          pay.Reference ||
+          `Payment for ${pay.Invoice?.InvoiceNumber || 'Invoice'}`,
         amount: `$${(pay.Amount || 0).toLocaleString()}`,
         paymentMethod: pay.PaymentType || 'ACH',
-        status: pay.Status === 'AUTHORISED' || pay.Status === 'PAID' ? 'Paid' : 'Pending',
+        status:
+          pay.Status === 'AUTHORISED' || pay.Status === 'PAID'
+            ? 'Paid'
+            : 'Pending',
         raw: pay,
       }));
     } catch (err: any) {
       this.logger.error(`Failed to fetch Xero payments: ${err.message}`);
-      return [
-        {
-          id: 'xero-pay-1',
-          vendorName: 'Karlos Talent (Xero)',
-          description: 'Xero processed royalty payout',
-          amount: '$14,800.00',
-          paymentMethod: 'ACH',
-          status: 'Paid',
-        },
-      ];
+      throw new BadGatewayException(`Xero payment sync failed: ${err.message}`);
     }
   }
 
   async getVendors(accessToken: string, tenantId?: string): Promise<any[]> {
-    if (!this.clientId || accessToken.includes('simulated')) {
-      return [
-        { id: 'xero-ven-1', name: 'Warner Music Group', email: 'billing@warnermusic.com' },
-        { id: 'xero-ven-2', name: 'Universal Music Global', email: 'finance@universalmusic.com' },
-      ];
+    if (!this.clientId) {
+      throw new ServiceUnavailableException('Xero connector is not configured');
     }
 
     try {
-      const response = await fetch('https://api.xero.com/api.xro/2.0/Contacts?where=IsSupplier==true', {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'xero-tenant-id': tenantId || '',
-          Accept: 'application/json',
+      const response = await fetch(
+        'https://api.xero.com/api.xro/2.0/Contacts?where=IsSupplier==true',
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'xero-tenant-id': tenantId || '',
+            Accept: 'application/json',
+          },
         },
-      });
+      );
 
       if (!response.ok) {
         throw new Error(`Xero Contacts API HTTP ${response.status}`);
@@ -307,14 +293,13 @@ export class XeroProvider implements IAccountingIntegrationProvider {
       }));
     } catch (err: any) {
       this.logger.error(`Failed to fetch Xero contacts: ${err.message}`);
-      return [
-        { id: 'xero-ven-1', name: 'Warner Music Group', email: 'billing@warnermusic.com' },
-        { id: 'xero-ven-2', name: 'Universal Music Global', email: 'finance@universalmusic.com' },
-      ];
+      throw new BadGatewayException(`Xero contact sync failed: ${err.message}`);
     }
   }
 
-  private mapXeroInvoiceStatus(status: string): 'paid' | 'pending' | 'cancelled' {
+  private mapXeroInvoiceStatus(
+    status: string,
+  ): 'paid' | 'pending' | 'cancelled' {
     switch (status?.toUpperCase()) {
       case 'PAID':
         return 'paid';
@@ -329,4 +314,3 @@ export class XeroProvider implements IAccountingIntegrationProvider {
     }
   }
 }
-

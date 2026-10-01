@@ -8,7 +8,10 @@ import { Prisma } from '@prisma/client';
 
 export type DecimalValue = Prisma.Decimal | number | string;
 
-export function toDecimal(value: DecimalValue | null | undefined, defaultValue = 0): Prisma.Decimal {
+export function toDecimal(
+  value: DecimalValue | null | undefined,
+  defaultValue = 0,
+): Prisma.Decimal {
   if (value === null || value === undefined) {
     return new Prisma.Decimal(defaultValue);
   }
@@ -18,7 +21,10 @@ export function toDecimal(value: DecimalValue | null | undefined, defaultValue =
   return new Prisma.Decimal(value);
 }
 
-export function toNumber(value: DecimalValue | null | undefined, defaultValue = 0): number {
+export function toNumber(
+  value: DecimalValue | null | undefined,
+  defaultValue = 0,
+): number {
   if (value === null || value === undefined) {
     return defaultValue;
   }
@@ -65,7 +71,10 @@ export function isEqualDecimal(a: DecimalValue, b: DecimalValue): boolean {
   return toDecimal(a).equals(toDecimal(b));
 }
 
-export function isGreaterThanDecimal(a: DecimalValue, b: DecimalValue): boolean {
+export function isGreaterThanDecimal(
+  a: DecimalValue,
+  b: DecimalValue,
+): boolean {
   return toDecimal(a).greaterThan(toDecimal(b));
 }
 

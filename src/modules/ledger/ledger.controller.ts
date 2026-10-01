@@ -1,12 +1,25 @@
-import { Controller, Get, Query, Param, UseGuards, ForbiddenException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Query,
+  Param,
+  UseGuards,
+  ForbiddenException,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { LedgerService } from './ledger.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators';
+import { AuthorizationGuard } from '../../auth/guards/authorization.guard';
+import {
+  AccountTypes,
+  OrganizationRoles,
+} from '../../auth/decorators/authorization.decorator';
 
 @ApiTags('Ledger (Double-Entry Accounting)')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, AuthorizationGuard)
+@AccountTypes('agency')
 @Controller('ledger')
 export class LedgerController {
   constructor(private readonly ledgerService: LedgerService) {}
@@ -40,7 +53,9 @@ export class LedgerController {
     };
   }
 
-  @ApiOperation({ summary: 'Get Journal entries history for the authenticated user' })
+  @ApiOperation({
+    summary: 'Get Journal entries history for the authenticated user',
+  })
   @Get('journal')
   async getJournalHistory(
     @CurrentUser('id') userId: string,
@@ -49,9 +64,14 @@ export class LedgerController {
   ) {
     const targetCode = accountCode || `AGENCY:${userId}:USD`;
     if (targetCode.startsWith('AGENCY:') && !targetCode.includes(userId)) {
-      throw new ForbiddenException('Access denied to this ledger account history');
+      throw new ForbiddenException(
+        'Access denied to this ledger account history',
+      );
     }
-    return this.ledgerService.getJournalHistory(targetCode, limit ? Number(limit) : 50);
+    return this.ledgerService.getJournalHistory(
+      targetCode,
+      limit ? Number(limit) : 50,
+    );
   }
 
   @ApiOperation({ summary: 'Get time-range statement for ledger account' })
@@ -65,7 +85,9 @@ export class LedgerController {
   ) {
     const targetCode = accountCode || `AGENCY:${userId}:USD`;
     if (targetCode.startsWith('AGENCY:') && !targetCode.includes(userId)) {
-      throw new ForbiddenException('Access denied to this ledger account statement');
+      throw new ForbiddenException(
+        'Access denied to this ledger account statement',
+      );
     }
 
     return this.ledgerService.getStatement(targetCode, {
@@ -75,10 +97,12 @@ export class LedgerController {
     });
   }
 
-  @ApiOperation({ summary: 'Get global double-entry trial balance (Admin/Reconciliation)' })
+  @ApiOperation({
+    summary: 'Get global double-entry trial balance (Admin/Reconciliation)',
+  })
   @Get('trial-balance')
+  @OrganizationRoles('super_admin', 'treasury')
   async getTrialBalance() {
-    return this.ledgerService.getTrialBalance();
+    return this.ledgerService.getCanonicalTrialBalance();
   }
 }
-

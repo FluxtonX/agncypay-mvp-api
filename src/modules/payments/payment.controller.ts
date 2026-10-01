@@ -1,39 +1,72 @@
-import { Controller, Get, Post, Body, Param, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Headers,
+  Param,
+  UseGuards,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiHeader,
+} from '@nestjs/swagger';
 import { PaymentService } from './payment.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators';
+import { AuthorizationGuard } from '../../auth/guards/authorization.guard';
+import {
+  AccountTypes,
+  Permissions,
+} from '../../auth/decorators/authorization.decorator';
+import { CreateBrandPaymentDto, ProvisionAgencyRailsDto } from './payment.dto';
 
 @ApiTags('Payments (Brand → Agency)')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, AuthorizationGuard)
 @Controller('payments')
 export class PaymentController {
   constructor(private readonly paymentService: PaymentService) {}
 
-  @ApiOperation({ summary: 'Initiate a Brand → Agency payment and obtain deposit instructions' })
+  @ApiOperation({
+    summary:
+      'Initiate a Brand → Agency payment and obtain deposit instructions',
+  })
+  @ApiHeader({ name: 'Idempotency-Key', required: true })
   @Post()
+  @AccountTypes('brand')
+  @Permissions('initiate_payments')
   async createPayment(
     @CurrentUser('id') brandId: string,
-    @Body('agencyId') agencyId: string,
-    @Body('amount') amount: number,
-    @Body('currency') currency?: string,
-    @Body('invoiceId') invoiceId?: string,
-    @Body('paymentMethod') paymentMethod?: string,
-    @Body('metadata') metadata?: Record<string, any>,
+    @Body() body: CreateBrandPaymentDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.paymentService.createPayment({
       brandId,
-      agencyId,
-      amount,
-      currency,
-      invoiceId,
-      paymentMethod,
-      metadata,
+      ...body,
+      idempotencyKey: idempotencyKey || '',
     });
   }
 
-  @ApiOperation({ summary: 'Get all payments for the authenticated user (Brand or Agency)' })
+  @ApiOperation({
+    summary:
+      'Provision the authenticated Agency collection and payout bank rails',
+  })
+  @Post('agency/rails')
+  @AccountTypes('agency')
+  @Permissions('manage_team')
+  provisionAgencyRails(
+    @CurrentUser('id') userId: string,
+    @Body() body: ProvisionAgencyRailsDto,
+  ) {
+    return this.paymentService.provisionAgencyPaymentRails(userId, body);
+  }
+
+  @ApiOperation({
+    summary: 'Get all payments for the authenticated user (Brand or Agency)',
+  })
   @Get()
   async getPayments(@CurrentUser('id') userId: string) {
     return this.paymentService.getPayments(userId);
@@ -48,7 +81,9 @@ export class PaymentController {
     return this.paymentService.getPaymentById(id, userId);
   }
 
-  @ApiOperation({ summary: 'Get deposit bank account funding instructions for a payment' })
+  @ApiOperation({
+    summary: 'Get deposit bank account funding instructions for a payment',
+  })
   @Get(':id/funding-instructions')
   async getFundingInstructions(
     @Param('id') id: string,

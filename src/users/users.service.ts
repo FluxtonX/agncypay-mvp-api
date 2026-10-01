@@ -17,12 +17,16 @@ export class UsersService {
         emailVerified: true,
         kybStatus: true,
         createdAt: true,
-        businessProfile: true,
-        bankDetails: true,
-        workspacesOwned: true,
-        memberships: {
+        participantLinks: {
           include: {
-            workspace: true,
+            participant: {
+              include: {
+                organizations: {
+                  where: { status: 'active' },
+                  include: { organization: true },
+                },
+              },
+            },
           },
         },
       },
@@ -32,7 +36,18 @@ export class UsersService {
       throw new NotFoundException('User not found');
     }
 
-    return user;
+    const organizations = user.participantLinks.flatMap((link) =>
+      link.participant.organizations.map((membership) => ({
+        id: membership.organization.id,
+        name: membership.organization.name,
+        type: membership.organization.type,
+        status: membership.organization.status,
+        relationshipType: membership.relationshipType,
+        metadata: membership.metadata,
+      })),
+    );
+    const { participantLinks, ...profile } = user;
+    return { ...profile, organizations };
   }
 
   async updateProfile(userId: string, data: { fullName?: string }) {

@@ -8,7 +8,7 @@ export class AuditLogsService {
 
   async log(params: {
     userId?: string;
-    workspaceId?: string;
+    organizationId?: string;
     action: string;
     entityType: string;
     entityId?: string;
@@ -18,7 +18,7 @@ export class AuditLogsService {
   }): Promise<AuditLog> {
     return this.auditLogRepo.create({
       userId: params.userId,
-      workspaceId: params.workspaceId,
+      organizationId: params.organizationId,
       action: params.action,
       entityType: params.entityType,
       entityId: params.entityId,

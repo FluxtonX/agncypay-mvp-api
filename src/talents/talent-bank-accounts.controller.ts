@@ -9,17 +9,30 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { TalentBankAccountsService, TalentBankAccountDto } from './talent-bank-accounts.service';
+import {
+  TalentBankAccountsService,
+  TalentBankAccountDto,
+} from './talent-bank-accounts.service';
+import { AuthorizationGuard } from '../auth/guards/authorization.guard';
+import { AccountTypes } from '../auth/decorators/authorization.decorator';
 
 @ApiTags('Talent Bank Accounts')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, AuthorizationGuard)
+@AccountTypes('talent')
 @Controller(['talents/bank-accounts', 'talent/bank-accounts'])
 export class TalentBankAccountsController {
-  constructor(private readonly bankAccountsService: TalentBankAccountsService) {}
+  constructor(
+    private readonly bankAccountsService: TalentBankAccountsService,
+  ) {}
 
   @ApiOperation({ summary: '1. Create Plaid Link Token for Talent' })
   @ApiResponse({ status: 200, description: 'Plaid Link Token generated' })
@@ -29,12 +42,18 @@ export class TalentBankAccountsController {
     return this.bankAccountsService.createLinkToken(userId);
   }
 
-  @ApiOperation({ summary: '2. Complete Plaid Link with public_token and accountId' })
-  @ApiResponse({ status: 201, description: 'Bank account linked and provider EBA provisioned' })
+  @ApiOperation({
+    summary: '2. Complete Plaid Link with public_token and accountId',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Bank account linked and provider EBA provisioned',
+  })
   @Post(['plaid/complete', 'link'])
   async completePlaidLink(
     @CurrentUser('id') userId: string,
-    @Body() body: { publicToken: string; accountId?: string; institutionName?: string },
+    @Body()
+    body: { publicToken: string; accountId?: string; institutionName?: string },
   ): Promise<TalentBankAccountDto> {
     return this.bankAccountsService.completePlaidLink(userId, body);
   }
@@ -42,7 +61,9 @@ export class TalentBankAccountsController {
   @ApiOperation({ summary: '3. List all linked bank accounts for Talent' })
   @ApiResponse({ status: 200, description: 'List of linked accounts' })
   @Get()
-  async getBankAccounts(@CurrentUser('id') userId: string): Promise<TalentBankAccountDto[]> {
+  async getBankAccounts(
+    @CurrentUser('id') userId: string,
+  ): Promise<TalentBankAccountDto[]> {
     return this.bankAccountsService.getBankAccounts(userId);
   }
 
@@ -78,7 +99,10 @@ export class TalentBankAccountsController {
   }
 
   @ApiOperation({ summary: '7. 1-Tap Sandbox Connect (Plaid Sandbox API)' })
-  @ApiResponse({ status: 201, description: 'Sandbox test bank account linked directly' })
+  @ApiResponse({
+    status: 201,
+    description: 'Sandbox test bank account linked directly',
+  })
   @Post('sandbox-connect')
   async linkSandboxAccount(
     @CurrentUser('id') userId: string,

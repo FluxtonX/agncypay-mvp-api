@@ -14,110 +14,36 @@ datasource db {
 // ─────────────────────────── USER & AUTH ───────────────────────────
 
 model User {
-  id                  String    @id @default(uuid())
-  email               String    @unique
-  password            String
-  fullName            String
-  accountType         AccountType
-  agncyId             String    @unique
-  emailVerified       Boolean   @default(false)
-  resetToken          String?
-  resetTokenExpires   DateTime?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-  deletedAt           DateTime?
+  id                String      @id @default(uuid())
+  email             String      @unique
+  password          String
+  fullName          String
+  accountType       AccountType
+  agncyId           String      @unique
+  emailVerified     Boolean     @default(false)
+  resetToken        String?
+  resetTokenExpires DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  deletedAt         DateTime?
 
-  // Payment Provider Infrastructure Identifiers
-  providerLegalEntityId     String?
-  providerCounterpartyId    String?
-  providerAccountId         String?
-  providerLedgerAccountId   String?
-  kybStatus                 KybStatus @default(not_started)
+  kybStatus KybStatus @default(not_started)
 
   // Relations
-  workspacesOwned Workspace[]
-  memberships     Membership[]
-  wallet          Wallet?
-  invoicesCreated Invoice[]     @relation("InvoiceCreator")
-  invoicesAsBrand Invoice[]     @relation("InvoiceBrand")
-  transactions    Transaction[]
-  treasury        BrandTreasury?
-  businessProfile BusinessProfile?
-  representative  Representative?
-  authorization   Authorization?
-  brandVerification BrandVerification?
-  bankDetails     BankDetails?
-  documents       Document[]
-  integrations    IntegrationConnection[]
-  quickBooksConnection QuickBooksConnection?
-  quickBooksInvoices   QuickBooksInvoice[]
-  refreshTokens   RefreshToken[]
-  agencyExternalAccounts AgencyExternalAccount[]
-  payouts         Payout[]
-
-  // Conduit relations
-  conduitCustomer      ConduitCustomer?
-  agencyId             String?
-  agency               User?            @relation("AgencyTalents", fields: [agencyId], references: [id], onDelete: SetNull)
-  talentsManaged       User[]           @relation("AgencyTalents")
-  talentPayouts        PaymentPayout[]  @relation("TalentPayouts")
-  talentRecipients     ConduitRecipient[] @relation("TalentConduitRecipients")
-  paymentsAsBrand    Payment[]        @relation("PaymentBrand")
-  paymentsAsAgency   Payment[]        @relation("PaymentAgency")
-  paymentPayouts     PaymentPayout[]  @relation("PayoutAgency")
+  businessProfile              BusinessProfile?
+  representative               Representative?
+  refreshTokens                RefreshToken[]
+  participantLinks             ParticipantUser[]
+  invitationsSent              Invitation[]              @relation("InvitationSender")
+  invitationsAccepted          Invitation[]              @relation("InvitationAcceptor")
+  oauthStatesCreated           IntegrationOAuthState[]
+  commercialDecisions          CommercialApproval[]
+  paymentInstructionsRequested PaymentInstruction[]      @relation("PaymentInstructionRequester")
+  paymentInstructionEvents     PaymentInstructionEvent[]
+  fxQuotesRequested            FxQuote[]
 
   @@map("users")
-
 }
-
-// ─────────────────────────── WALLET & LEDGER ───────────────────────────
-
-model Wallet {
-  id          String        @id @default(uuid())
-  walletId    String        @unique // Primary identity e.g. WAL-AGY-849201
-  userId      String        @unique
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accountType AccountType
-  balance     Decimal       @default(0.0) @db.Decimal(18, 4)
-  currency    String        @default("USD")
-  status      WalletStatus  @default(active)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  deletedAt   DateTime?
-
-  ledgerEntries WalletLedger[]
-  invoicesAsAgency Invoice[]   @relation("AgencyWalletInvoices")
-  invoicesAsBrand  Invoice[]   @relation("BrandWalletInvoices")
-
-  @@map("wallets")
-}
-
-enum WalletStatus {
-  active
-  frozen
-  suspended
-}
-
-model WalletLedger {
-  id            String     @id @default(uuid())
-  walletId      String
-  wallet        Wallet     @relation(fields: [walletId], references: [id], onDelete: Cascade)
-  type          LedgerType
-  amount        Decimal    @db.Decimal(18, 4)
-  balanceAfter  Decimal    @db.Decimal(18, 4)
-  referenceType String     // INVOICE_PAYMENT, DEPOSIT, DISBURSEMENT
-  referenceId   String?
-  description   String     @default("")
-  createdAt     DateTime   @default(now())
-
-  @@map("wallet_ledgers")
-}
-
-enum LedgerType {
-  credit
-  debit
-}
-
 
 model RefreshToken {
   id        String   @id @default(uuid())
@@ -136,65 +62,7 @@ enum AccountType {
   talent
 }
 
-// ─────────────────────────── WORKSPACE ───────────────────────────
-
-model Workspace {
-  id                 String             @id @default(uuid())
-  type               WorkspaceType
-  name               String
-  agncyId            String             @unique
-  verificationTrack  VerificationTrack  @default(kyb)
-  verificationStatus VerificationStatus @default(draft)
-  ownerId            String
-  owner              User               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-  deletedAt          DateTime?
-
-  memberships Membership[]
-
-  @@map("workspaces")
-}
-
-model Membership {
-  id          String          @id @default(uuid())
-  userId      String
-  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workspaceId String
-  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  role        WorkspaceRole
-  permissions String[]
-  status      MembershipStatus @default(active)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  deletedAt   DateTime?
-
-  @@unique([userId, workspaceId])
-  @@map("memberships")
-}
-
-enum WorkspaceType {
-  brand
-  agency
-  mother_agency
-}
-
-enum VerificationTrack {
-  kyb
-  enterprise_kyb
-}
-
-enum VerificationStatus {
-  draft
-  submitted
-  in_review
-  requires_action
-  approved
-  rejected
-  suspended
-}
-
-enum WorkspaceRole {
+enum OrganizationRole {
   admin
   finance
   approver
@@ -206,10 +74,281 @@ enum WorkspaceRole {
   finance_ops
 }
 
-enum MembershipStatus {
+// ───────────────────── CANONICAL NETWORK IDENTITY ─────────────────────
+
+// Authentication users, AP participants, organizations, external-system
+// identities, and provider identities are deliberately separate.
+
+model Organization {
+  id        String           @id @default(uuid())
+  type      OrganizationType
+  name      String
+  status    String           @default("active")
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  deletedAt DateTime?
+
+  participants                OrganizationParticipant[]
+  externalIdentities          ExternalIdentityMap[]
+  financialAccounts           FinancialAccount[]
+  providerParties             ProviderPartyMap[]
+  invitations                 Invitation[]
+  sourceConnections           SourceConnection[]
+  oauthStates                 IntegrationOAuthState[]
+  agencyCommercialDocuments   CommercialDocument[]       @relation("CommercialDocumentAgency")
+  payerCommercialDocuments    CommercialDocument[]       @relation("CommercialDocumentPayer")
+  outboundPaymentInstructions PaymentInstruction[]       @relation("PaymentInstructionSourceOrganization")
+  inboundPaymentInstructions  PaymentInstruction[]       @relation("PaymentInstructionDestinationOrganization")
+  relationshipsFrom           OrganizationRelationship[] @relation("OrganizationRelationshipSource")
+  relationshipsTo             OrganizationRelationship[] @relation("OrganizationRelationshipTarget")
+  ledgerAccounts              LedgerAccount[]
+
+  @@index([type, status])
+  @@map("organizations")
+}
+
+enum OrganizationType {
+  brand
+  agency
+  platform
+}
+
+model Participant {
+  id          String          @id @default(uuid())
+  kind        ParticipantKind @default(individual)
+  displayName String
+  status      String          @default("active")
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  deletedAt   DateTime?
+
+  users                       ParticipantUser[]
+  organizations               OrganizationParticipant[]
+  externalIdentities          ExternalIdentityMap[]
+  financialAccounts           FinancialAccount[]
+  providerParties             ProviderPartyMap[]
+  invitations                 Invitation[]
+  sourceConnections           SourceConnection[]
+  payableAllocations          PayableAllocation[]
+  outboundPaymentInstructions PaymentInstruction[]      @relation("PaymentInstructionSourceParticipant")
+  inboundPaymentInstructions  PaymentInstruction[]      @relation("PaymentInstructionDestinationParticipant")
+  ledgerAccounts              LedgerAccount[]
+  talentBalanceLots           TalentBalanceLot[]
+  fxQuotes                    FxQuote[]
+
+  @@index([status])
+  @@map("participants")
+}
+
+enum ParticipantKind {
+  individual
+  business
+}
+
+model ParticipantUser {
+  id            String      @id @default(uuid())
+  participantId String
+  participant   Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  userId        String      @unique
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isPrimary     Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+
+  @@index([participantId])
+  @@map("participant_users")
+}
+
+model OrganizationParticipant {
+  id               String       @id @default(uuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  participantId    String
+  participant      Participant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  relationshipType String
+  status           String       @default("active")
+  startsAt         DateTime     @default(now())
+  endsAt           DateTime?
+  metadata         Json         @default("{}")
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@unique([organizationId, participantId, relationshipType])
+  @@index([participantId, status])
+  @@map("organization_participants")
+}
+
+model ExternalIdentityMap {
+  id             String        @id @default(uuid())
+  participantId  String?
+  participant    Participant?  @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceSystem   String
+  sourceTenantId String        @default("")
+  externalType   String
+  externalId     String
+  status         String        @default("active")
+  metadata       Json          @default("{}")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([sourceSystem, sourceTenantId, externalType, externalId])
+  @@index([participantId, sourceSystem])
+  @@index([organizationId, sourceSystem])
+  @@map("external_identity_maps")
+}
+
+model FinancialAccount {
+  id              String                 @id @default(uuid())
+  participantId   String?
+  participant     Participant?           @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  organizationId  String?
+  organization    Organization?          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  type            FinancialAccountType
+  status          FinancialAccountStatus @default(pending)
+  currency        String                 @default("USD")
+  country         String?
+  displayName     String                 @default("")
+  institutionName String?
+  lastFour        String?
+  isPrimary       Boolean                @default(false)
+  metadata        Json                   @default("{}")
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  deletedAt       DateTime?
+
+  providerAccounts            ProviderAccountMap[]
+  outboundPaymentInstructions PaymentInstruction[] @relation("PaymentInstructionSourceAccount")
+  inboundPaymentInstructions  PaymentInstruction[] @relation("PaymentInstructionDestinationAccount")
+
+  @@index([participantId, status])
+  @@index([organizationId, status])
+  @@map("financial_accounts")
+}
+
+enum FinancialAccountType {
+  external_bank
+  virtual_account
+  wallet
+}
+
+enum FinancialAccountStatus {
+  pending
+  ready
+  restricted
+  disabled
+}
+
+model ProviderPartyMap {
+  id             String                @id @default(uuid())
+  participantId  String?
+  participant    Participant?          @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization   Organization?         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  provider       String
+  partyType      String
+  externalId     String
+  status         ProviderMappingStatus @default(pending)
+  metadata       Json                  @default("{}")
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  @@unique([provider, externalId])
+  @@index([participantId, provider])
+  @@index([organizationId, provider])
+  @@map("provider_party_maps")
+}
+
+model ProviderAccountMap {
+  id                 String                @id @default(uuid())
+  financialAccountId String
+  financialAccount   FinancialAccount      @relation(fields: [financialAccountId], references: [id], onDelete: Cascade)
+  provider           String
+  accountType        String
+  externalId         String
+  status             ProviderMappingStatus @default(pending)
+  metadata           Json                  @default("{}")
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  @@unique([provider, externalId])
+  @@index([financialAccountId, provider])
+  @@map("provider_account_maps")
+}
+
+enum ProviderMappingStatus {
+  pending
   active
-  invited
-  requested
+  restricted
+  closed
+}
+
+model Invitation {
+  id                       String                    @id @default(uuid())
+  organizationId           String
+  organization             Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  participantId            String?
+  participant              Participant?              @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  email                    String
+  accountType              AccountType
+  relationshipType         String
+  organizationRole         OrganizationRole?
+  permissions              String[]
+  tokenHash                String                    @unique
+  status                   InvitationStatus          @default(pending)
+  expiresAt                DateTime
+  acceptedAt               DateTime?
+  invitedById              String
+  invitedBy                User                      @relation("InvitationSender", fields: [invitedById], references: [id], onDelete: Restrict)
+  acceptedById             String?
+  acceptedBy               User?                     @relation("InvitationAcceptor", fields: [acceptedById], references: [id], onDelete: SetNull)
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
+  organizationRelationship OrganizationRelationship?
+
+  @@index([organizationId, status])
+  @@index([email, status])
+  @@map("invitations")
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  revoked
+  expired
+}
+
+model OrganizationRelationship {
+  id                   String                         @id @default(uuid())
+  sourceOrganizationId String
+  sourceOrganization   Organization                   @relation("OrganizationRelationshipSource", fields: [sourceOrganizationId], references: [id], onDelete: Restrict)
+  targetOrganizationId String
+  targetOrganization   Organization                   @relation("OrganizationRelationshipTarget", fields: [targetOrganizationId], references: [id], onDelete: Restrict)
+  relationshipType     OrganizationRelationshipType
+  status               OrganizationRelationshipStatus @default(active)
+  originInvitationId   String?                        @unique
+  originInvitation     Invitation?                    @relation(fields: [originInvitationId], references: [id], onDelete: SetNull)
+  metadata             Json                           @default("{}")
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
+  endedAt              DateTime?
+
+  @@unique([sourceOrganizationId, targetOrganizationId, relationshipType])
+  @@index([targetOrganizationId, relationshipType, status])
+  @@map("organization_relationships")
+}
+
+enum OrganizationRelationshipType {
+  agency_brand
+  agency_network
+  accounting_sponsor
+}
+
+enum OrganizationRelationshipStatus {
+  pending
+  active
+  suspended
+  ended
 }
 
 // ─────────────────────────── BUSINESS VERIFICATION ───────────────────────────
@@ -279,155 +418,6 @@ enum RepresentativeStatus {
   rejected
 }
 
-model Authorization {
-  id                      String    @id @default(uuid())
-  userId                  String    @unique
-  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  isOwner                 Boolean?
-  owns25Percent           Boolean?
-  isAuthorizedForPayments Boolean?
-  authLetterUploaded      Boolean   @default(false)
-  powerOfAttorneyUploaded Boolean   @default(false)
-  signatoryName           String    @default("")
-  signatoryEmail          String    @default("")
-  roleInCompany           String    @default("")
-  formationDate           String    @default("")
-  incorporationState      String    @default("")
-  employeeRange           String    @default("")
-  monthlyPaymentVolume    String    @default("")
-  owners                  Json      @default("[]")
-  createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
-  deletedAt               DateTime?
-
-  @@map("authorizations")
-}
-
-model BrandVerification {
-  id                          String             @id @default(uuid())
-  userId                      String             @unique
-  user                        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  brandName                   String             @default("")
-  officialWebsite             String             @default("")
-  officialEmail               String             @default("")
-  domainVerified              Boolean            @default(false)
-  trademarkNumber             String             @default("")
-  brandCategory               String             @default("")
-  logoUploaded                Boolean            @default(false)
-  brandProofUploaded          Boolean            @default(false)
-  trademarkCertUploaded       Boolean            @default(false)
-  distributorContractUploaded Boolean            @default(false)
-  authLetterUploaded          Boolean            @default(false)
-  domainVerificationCode      String             @default("123456")
-  domainCodeSent              Boolean            @default(false)
-  domainCodeAttempts          Int                @default(0)
-  emailDomainWarning          Boolean            @default(false)
-  status                      VerificationStatus @default(draft)
-  createdAt                   DateTime           @default(now())
-  updatedAt                   DateTime           @updatedAt
-  deletedAt                   DateTime?
-
-  @@map("brand_verifications")
-}
-
-model BankDetails {
-  id                String           @id @default(uuid())
-  userId            String           @unique
-  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accountHolderName String           @default("")
-  bankName          String           @default("")
-  country           String           @default("")
-  currency          String           @default("USD")
-  accountNumber     String           @default("")
-  routingNumber     String           @default("")
-  bankAddress       String           @default("")
-  statementUploaded Boolean          @default(false)
-  holderNameWarning Boolean          @default(false)
-  plaidAccessToken  String?
-  plaidAccountId    String?
-  plaidItemId       String?
-  status            BankDetailStatus @default(not_started)
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
-  deletedAt         DateTime?
-
-  @@map("bank_details")
-}
-
-enum BankDetailStatus {
-  not_started
-  uploaded
-  processing
-  approved
-  rejected
-}
-
-model Document {
-  id         String         @id @default(uuid())
-  userId     String
-  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  label      String
-  type       String
-  status     DocumentStatus @default(not_uploaded)
-  fileUrl    String?
-  uploadedAt DateTime?
-  createdAt  DateTime       @default(now())
-  updatedAt  DateTime       @updatedAt
-  deletedAt  DateTime?
-
-  @@map("documents")
-}
-
-enum DocumentStatus {
-  not_uploaded
-  uploaded
-  approved
-  rejected
-}
-
-// ─────────────────────────── INVOICES & TRANSACTIONS ───────────────────────────
-
-model Invoice {
-  id             String        @id @default(uuid())
-  invoiceNumber  String        @unique
-  campaign       String        @default("")
-  agencyId       String
-  agency         User          @relation("InvoiceCreator", fields: [agencyId], references: [id])
-  agencyEmail    String
-  agencyWalletId String?
-  agencyWallet   Wallet?       @relation("AgencyWalletInvoices", fields: [agencyWalletId], references: [id])
-  brandId        String
-  brand          User          @relation("InvoiceBrand", fields: [brandId], references: [id])
-  brandName      String
-  brandEmail     String
-  brandWalletId  String?
-  brandWallet    Wallet?       @relation("BrandWalletInvoices", fields: [brandWalletId], references: [id])
-  amount         Decimal       @db.Decimal(18, 4)
-  due            String
-  status         InvoiceStatus @default(pending)
-  payoutStatus   PayoutStatus  @default(pending)
-  createdDate    String
-
-  payerId       String        @default("")
-  payerEmail    String        @default("")
-  payerAddress  String[]      @default([])
-  splits        Json          @default("[]")
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  deletedAt     DateTime?
-
-  transactions Transaction[]
-
-  @@map("invoices")
-}
-
-enum InvoiceStatus {
-  pending
-  processing
-  paid
-  overdue
-}
-
 enum KybStatus {
   not_started
   pending
@@ -435,150 +425,252 @@ enum KybStatus {
   rejected
 }
 
-enum PayoutStatus {
+// Canonical, organization/participant-scoped connection model.
+model SourceConnection {
+  id                     String                 @id @default(uuid())
+  organizationId         String?
+  organization           Organization?          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  participantId          String?
+  participant            Participant?           @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  connectorKey           String
+  externalTenantId       String
+  displayName            String                 @default("")
+  status                 SourceConnectionStatus @default(pending)
+  credentialsEncrypted   String                 @default("")
+  credentialKeyVersion   Int                    @default(1)
+  webhookSecretHash      String?
+  signingSecretEncrypted String?
+  syncCursor             String?
+  lastSyncedAt           DateTime?
+  lastError              String?
+  metadata               Json                   @default("{}")
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+  deletedAt              DateTime?
+
+  events              SourceEvent[]
+  commercialDocuments CommercialDocument[]
+
+  @@unique([connectorKey, externalTenantId, organizationId, participantId])
+  @@index([organizationId, connectorKey, status])
+  @@index([participantId, connectorKey, status])
+  @@map("source_connections")
+}
+
+enum SourceConnectionStatus {
   pending
-  processing
-  disbursed
-  failed
-  returned
-}
-
-model AgencyExternalAccount {
-  id                               String   @id @default(uuid())
-  agencyId                         String
-  agency                           User     @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  accountName                      String   @default("")
-  bankName                         String   @default("")
-  accountNumberMask                String   @default("")
-  routingNumber                    String   @default("")
-  providerExternalAccountId String   @unique
-  isPrimary                        Boolean  @default(false)
-  createdAt                        DateTime @default(now())
-  updatedAt                        DateTime @updatedAt
-
-  @@map("agency_external_accounts")
-}
-
-model Payout {
-  id                           String       @id @default(uuid())
-  agencyId                     String
-  agency                       User         @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  amount                       Decimal      @db.Decimal(18, 4)
-  currency                     String       @default("USD")
-  destinationExternalAccountId String
-  paymentOrderId               String?      @unique
-  status                       PayoutStatus @default(pending)
-  metadata                     Json         @default("{}")
-  createdAt                    DateTime     @default(now())
-  updatedAt                    DateTime     @updatedAt
-
-  @@map("payouts")
-}
-
-model WebhookEvent {
-  id          String   @id @default(uuid())
-  eventId     String   @unique
-  eventType   String
-  status      String   @default("processed")
-  payload     Json     @default("{}")
-  processedAt DateTime @default(now())
-
-  @@index([eventId, eventType])
-  @@map("webhook_events")
-}
-
-model Transaction {
-  id             String            @id @default(uuid())
-  invoiceId      String
-  invoice        Invoice           @relation(fields: [invoiceId], references: [id])
-  userId         String
-  user           User              @relation(fields: [userId], references: [id])
-  amount         Decimal           @db.Decimal(18, 4)
-  currency       String            @default("USD")
-  timestamp      DateTime          @default(now())
-  paymentMethod  String            @default("")
-  paymentOrderId String?
-  counterpartyId String?
-  status         TransactionStatus @default(processing)
-  createdAt      DateTime          @default(now())
-  deletedAt      DateTime?
-
-  @@map("transactions")
-}
-
-enum TransactionStatus {
-  success
-  failed
-  processing
-}
-
-// ─────────────────────────── TREASURY ───────────────────────────
-
-model BrandTreasury {
-  id                String    @id @default(uuid())
-  userId            String    @unique
-  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  balance           Decimal   @default(0.0) @db.Decimal(18, 4)
-  lastDepositAmount Decimal?  @db.Decimal(18, 4)
-  lastDepositMethod String?
-  lastUpdated       DateTime  @default(now())
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  deletedAt         DateTime?
-
-  @@map("brand_treasuries")
-}
-
-// ─────────────────────────── INTEGRATIONS ───────────────────────────
-
-model IntegrationConnection {
-  id              String              @id @default(uuid())
-  userId          String
-  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  provider        IntegrationProvider
-  accessToken     String              @default("")
-  refreshToken    String              @default("")
-  realmId         String?
-  tenantId        String?
-  itemId          String?
-  institutionName String?
-  expiresAt       DateTime?
-  status          IntegrationStatus   @default(disconnected)
-  connectedAt     DateTime?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  deletedAt       DateTime?
-
-  @@unique([userId, provider])
-  @@map("integration_connections")
-}
-
-enum IntegrationProvider {
-  quickbooks
-  xero
-  plaid
-  sage
-}
-
-enum IntegrationStatus {
-  connected
-  disconnected
+  active
   expired
+  disconnected
+  error
+}
+
+model SourceEvent {
+  id              String            @id @default(uuid())
+  connectionId    String
+  connection      SourceConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  externalEventId String
+  eventType       String
+  payloadHash     String
+  payload         Json
+  occurredAt      DateTime?
+  status          SourceEventStatus @default(received)
+  attempts        Int               @default(0)
+  error           String?
+  receivedAt      DateTime          @default(now())
+  processedAt     DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  commercialVersions CommercialDocumentVersion[]
+
+  @@unique([connectionId, externalEventId])
+  @@index([status, receivedAt])
+  @@index([connectionId, eventType, occurredAt])
+  @@map("source_events")
+}
+
+enum SourceEventStatus {
+  received
+  processing
+  processed
+  ignored
+  failed
+}
+
+// Immutable CRM/accounting commercial economics. AgncyPay validates these
+// records but never recalculates Agency/Talent allocations.
+model CommercialDocument {
+  id                   String                   @id @default(uuid())
+  sourceConnectionId   String
+  sourceConnection     SourceConnection         @relation(fields: [sourceConnectionId], references: [id], onDelete: Restrict)
+  agencyOrganizationId String
+  agencyOrganization   Organization             @relation("CommercialDocumentAgency", fields: [agencyOrganizationId], references: [id], onDelete: Restrict)
+  payerOrganizationId  String?
+  payerOrganization    Organization?            @relation("CommercialDocumentPayer", fields: [payerOrganizationId], references: [id], onDelete: Restrict)
+  externalDocumentId   String
+  documentType         CommercialDocumentType
+  status               CommercialDocumentStatus @default(received)
+  currentVersionNumber Int                      @default(0)
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  deletedAt            DateTime?
+
+  versions CommercialDocumentVersion[]
+
+  @@unique([sourceConnectionId, documentType, externalDocumentId])
+  @@index([agencyOrganizationId, status])
+  @@index([payerOrganizationId, status])
+  @@map("commercial_documents")
+}
+
+enum CommercialDocumentType {
+  invoice
+  payable
+  credit_note
+}
+
+enum CommercialDocumentStatus {
+  received
+  valid
+  invalid
+  superseded
+  cancelled
+}
+
+model CommercialDocumentVersion {
+  id               String                     @id @default(uuid())
+  documentId       String
+  document         CommercialDocument         @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  sourceEventId    String?
+  sourceEvent      SourceEvent?               @relation(fields: [sourceEventId], references: [id], onDelete: SetNull)
+  versionNumber    Int
+  sourceVersion    String
+  payloadHash      String
+  currency         String
+  totalAmount      Decimal                    @db.Decimal(18, 4)
+  effectiveAt      DateTime?
+  dueAt            DateTime?
+  validationStatus CommercialValidationStatus @default(pending)
+  rawPayload       Json
+  createdAt        DateTime                   @default(now())
+
+  allocations         PayableAllocation[]
+  findings            CommercialValidationFinding[]
+  approval            CommercialApproval?
+  paymentInstructions PaymentInstruction[]
+
+  @@unique([documentId, versionNumber])
+  @@unique([documentId, sourceVersion])
+  @@index([sourceEventId])
+  @@map("commercial_document_versions")
+}
+
+enum CommercialValidationStatus {
+  pending
+  valid
+  invalid
+}
+
+model PayableAllocation {
+  id                       String                     @id @default(uuid())
+  documentVersionId        String
+  documentVersion          CommercialDocumentVersion  @relation(fields: [documentVersionId], references: [id], onDelete: Restrict)
+  externalAllocationId     String
+  beneficiaryParticipantId String?
+  beneficiaryParticipant   Participant?               @relation(fields: [beneficiaryParticipantId], references: [id], onDelete: Restrict)
+  amount                   Decimal                    @db.Decimal(18, 4)
+  currency                 String
+  status                   AllocationValidationStatus @default(pending)
+  metadata                 Json                       @default("{}")
+  createdAt                DateTime                   @default(now())
+
+  paymentInstructions PaymentInstruction[]
+
+  @@unique([documentVersionId, externalAllocationId])
+  @@index([beneficiaryParticipantId, status])
+  @@map("payable_allocations")
+}
+
+enum AllocationValidationStatus {
+  pending
+  valid
+  invalid
+}
+
+model CommercialValidationFinding {
+  id                String                    @id @default(uuid())
+  documentVersionId String
+  documentVersion   CommercialDocumentVersion @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+  code              String
+  severity          ValidationFindingSeverity
+  field             String?
+  message           String
+  details           Json                      @default("{}")
+  createdAt         DateTime                  @default(now())
+
+  @@index([documentVersionId, severity])
+  @@map("commercial_validation_findings")
+}
+
+enum ValidationFindingSeverity {
+  error
+  warning
+  info
+}
+
+model CommercialApproval {
+  id                String                    @id @default(uuid())
+  documentVersionId String                    @unique
+  documentVersion   CommercialDocumentVersion @relation(fields: [documentVersionId], references: [id], onDelete: Restrict)
+  status            CommercialApprovalStatus  @default(pending)
+  decidedById       String?
+  decidedBy         User?                     @relation(fields: [decidedById], references: [id], onDelete: SetNull)
+  decidedAt         DateTime?
+  reason            String?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  @@index([status, createdAt])
+  @@map("commercial_approvals")
+}
+
+enum CommercialApprovalStatus {
+  pending
+  approved
+  rejected
+}
+
+model IntegrationOAuthState {
+  id             String       @id @default(uuid())
+  stateHash      String       @unique
+  connectorKey   String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdById    String
+  createdBy      User         @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  returnTo       String       @default("/agencydashboard/integrations")
+  expiresAt      DateTime
+  consumedAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, connectorKey, expiresAt])
+  @@map("integration_oauth_states")
 }
 
 // ─────────────────────────── AUDIT LOGS & FEATURE FLAGS ───────────────────────────
 
 model AuditLog {
-  id          String   @id @default(uuid())
-  userId      String?
-  workspaceId String?
-  action      String
-  entityType  String
-  entityId    String?
-  details     Json     @default("{}")
-  ipAddress   String?
-  userAgent   String?
-  createdAt   DateTime @default(now())
+  id             String   @id @default(uuid())
+  userId         String?
+  organizationId String?
+  action         String
+  entityType     String
+  entityId       String?
+  details        Json     @default("{}")
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
 
   @@map("audit_logs")
 }
@@ -595,268 +687,201 @@ model FeatureFlag {
   @@map("feature_flags")
 }
 
-// ─────────────────────────── QUICKBOOKS MODULE ───────────────────────────
+// ───────────────────── PROVIDER-NEUTRAL PAYMENT ORCHESTRATION ─────────────────────
 
-model QuickBooksConnection {
-  id           String                  @id @default(uuid())
-  agencyId     String                  @unique
-  agency       User                    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  realmId      String?
-  accessToken  String                  @default("")
-  refreshToken String                  @default("")
-  tokenExpiry  DateTime?
-  status       QuickBooksConnectStatus @default(disconnected)
-  connectedAt  DateTime?
-  lastSync     DateTime?
-  lastError    String?
-  createdAt    DateTime                @default(now())
-  updatedAt    DateTime                @updatedAt
+model PaymentInstruction {
+  id                            String                     @id @default(uuid())
+  instructionType               PaymentInstructionType
+  status                        PaymentInstructionStatus   @default(requested)
+  revision                      Int                        @default(0)
+  sourceOrganizationId          String?
+  sourceOrganization            Organization?              @relation("PaymentInstructionSourceOrganization", fields: [sourceOrganizationId], references: [id], onDelete: Restrict)
+  destinationOrganizationId     String?
+  destinationOrganization       Organization?              @relation("PaymentInstructionDestinationOrganization", fields: [destinationOrganizationId], references: [id], onDelete: Restrict)
+  sourceParticipantId           String?
+  sourceParticipant             Participant?               @relation("PaymentInstructionSourceParticipant", fields: [sourceParticipantId], references: [id], onDelete: Restrict)
+  destinationParticipantId      String?
+  destinationParticipant        Participant?               @relation("PaymentInstructionDestinationParticipant", fields: [destinationParticipantId], references: [id], onDelete: Restrict)
+  sourceFinancialAccountId      String?
+  sourceFinancialAccount        FinancialAccount?          @relation("PaymentInstructionSourceAccount", fields: [sourceFinancialAccountId], references: [id], onDelete: Restrict)
+  destinationFinancialAccountId String?
+  destinationFinancialAccount   FinancialAccount?          @relation("PaymentInstructionDestinationAccount", fields: [destinationFinancialAccountId], references: [id], onDelete: Restrict)
+  commercialDocumentVersionId   String?
+  commercialDocumentVersion     CommercialDocumentVersion? @relation(fields: [commercialDocumentVersionId], references: [id], onDelete: Restrict)
+  payableAllocationId           String?
+  payableAllocation             PayableAllocation?         @relation(fields: [payableAllocationId], references: [id], onDelete: Restrict)
+  amount                        Decimal                    @db.Decimal(18, 4)
+  currency                      String
+  providerRequired              Boolean                    @default(true)
+  purpose                       String                     @default("")
+  idempotencyScope              String
+  idempotencyKey                String
+  payloadHash                   String
+  requestedById                 String
+  requestedBy                   User                       @relation("PaymentInstructionRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  requestedAt                   DateTime                   @default(now())
+  submittedAt                   DateTime?
+  settledAt                     DateTime?
+  failedAt                      DateTime?
+  cancelledAt                   DateTime?
+  failureCode                   String?
+  failureReason                 String?
+  metadata                      Json                       @default("{}")
+  createdAt                     DateTime                   @default(now())
+  updatedAt                     DateTime                   @updatedAt
 
-  @@map("quickbooks_connections")
+  events              PaymentInstructionEvent[]
+  attempts            PaymentAttempt[]
+  ledgerTransactions  LedgerTransaction[]
+  talentBalanceLot    TalentBalanceLot?
+  balanceReservations TalentBalanceReservation[]
+  fxConversion        FxConversion?
+
+  @@unique([idempotencyScope, idempotencyKey])
+  @@index([status, createdAt])
+  @@index([sourceOrganizationId, status])
+  @@index([destinationOrganizationId, status])
+  @@index([destinationParticipantId, status])
+  @@index([commercialDocumentVersionId])
+  @@index([payableAllocationId])
+  @@map("payment_instructions")
 }
 
-enum QuickBooksConnectStatus {
-  disconnected
-  connecting
-  connected
-  syncing
-  expired
-  reconnect_required
-  sync_failed
+enum PaymentInstructionType {
+  brand_to_agency
+  agency_to_talent_balance
+  talent_withdrawal
+  agency_withdrawal
+  refund
+  balance_conversion
 }
 
-model QuickBooksInvoice {
-  id                  String   @id @default(uuid())
-  agencyId            String
-  agency              User     @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  quickbooksInvoiceId String
-  invoiceNumber       String
-  customerName        String
-  amount              Decimal  @db.Decimal(18, 4)
-  currency            String   @default("USD")
-  issueDate           String
-  dueDate             String
-  status              String
-  syncedAt            DateTime @default(now())
-  rawPayload          Json     @default("{}")
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-
-  @@unique([agencyId, quickbooksInvoiceId])
-  @@map("quickbooks_invoices")
+enum PaymentInstructionStatus {
+  requested
+  validated
+  awaiting_funding
+  funding_pending
+  funded
+  awaiting_provider
+  submitted
+  processing
+  settled
+  failed
+  cancelled
+  returned
+  review_required
 }
 
-// ─────────────────────────── CONDUIT INTEGRATION ───────────────────────────
+model PaymentInstructionEvent {
+  id            String                    @id @default(uuid())
+  instructionId String
+  instruction   PaymentInstruction        @relation(fields: [instructionId], references: [id], onDelete: Restrict)
+  sequence      Int
+  fromStatus    PaymentInstructionStatus?
+  toStatus      PaymentInstructionStatus
+  actorId       String?
+  actor         User?                     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  reason        String?
+  metadata      Json                      @default("{}")
+  createdAt     DateTime                  @default(now())
 
-model ConduitCustomer {
-  id                    String    @id @default(uuid())
-  userId                String    @unique
-  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  conduitCustomerId     String    @unique
-  customerType          String    @default("business") // "business" | "individual"
-  status                String    @default("pending")  // "pending" | "active" | "suspended"
-  kybStatus             String    @default("not_started") // "not_started" | "pending" | "approved" | "rejected"
-  applicationId         String?
-  country               String?   @default("USA")
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-
-  virtualAccounts       ConduitVirtualAccount[]
-  wallets               ConduitWallet[]
-  recipients            ConduitRecipient[]
-
-  @@map("conduit_customers")
+  @@unique([instructionId, sequence])
+  @@index([instructionId, createdAt])
+  @@map("payment_instruction_events")
 }
 
-model ConduitVirtualAccount {
-  id                    String    @id @default(uuid())
-  conduitCustomerId     String
-  conduitCustomer       ConduitCustomer @relation(fields: [conduitCustomerId], references: [id], onDelete: Cascade)
-  virtualAccountId      String    @unique
-  currency              String    @default("USD")
-  accountNumber         String?
-  routingNumber         String?
-  bankName              String?
-  beneficiaryName       String?
-  status                String    @default("active")
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
+model PaymentAttempt {
+  id                String               @id @default(uuid())
+  instructionId     String
+  instruction       PaymentInstruction   @relation(fields: [instructionId], references: [id], onDelete: Restrict)
+  attemptNumber     Int
+  provider          String
+  operationType     String
+  status            PaymentAttemptStatus @default(requested)
+  idempotencyKey    String
+  requestHash       String
+  externalReference String?
+  requestPayload    Json                 @default("{}")
+  responsePayload   Json                 @default("{}")
+  errorCode         String?
+  errorMessage      String?
+  submittedAt       DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
 
-  @@index([conduitCustomerId])
-  @@map("conduit_virtual_accounts")
+  @@unique([instructionId, attemptNumber])
+  @@unique([provider, idempotencyKey])
+  @@unique([provider, externalReference])
+  @@index([instructionId, status])
+  @@index([status, createdAt])
+  @@map("payment_attempts")
 }
 
-model ConduitWallet {
-  id                    String    @id @default(uuid())
-  conduitCustomerId     String
-  conduitCustomer       ConduitCustomer @relation(fields: [conduitCustomerId], references: [id], onDelete: Cascade)
-  walletId              String    @unique
-  chain                 String    // e.g. "base", "polygon", "ethereum", "solana"
-  address               String
-  status                String    @default("active")
-  isNonCustodial        Boolean   @default(true)
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-
-  @@index([conduitCustomerId, chain])
-  @@map("conduit_wallets")
-}
-
-model ConduitRecipient {
-  id                    String    @id @default(uuid())
-  conduitCustomerId     String
-  conduitCustomer       ConduitCustomer @relation(fields: [conduitCustomerId], references: [id], onDelete: Cascade)
-  recipientId           String    @unique
-  name                  String
-  recipientType         String    @default("individual") // "individual" | "business"
-  talentId              String?
-  talent                User?     @relation("TalentConduitRecipients", fields: [talentId], references: [id])
-  status                String    @default("active")
-  payoutRail            String?   @default("ach")
-  accountNumberMask     String?
-  routingNumber         String?
-  walletAddress         String?
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-
-  @@map("conduit_recipients")
-}
-
-// ─────────────────────────── PAYMENT (Brand → Agency) ───────────────────────────
-
-model Payment {
-  id                  String    @id @default(uuid())
-  paymentNumber       String    @unique
-  brandId             String
-  brand               User      @relation("PaymentBrand", fields: [brandId], references: [id])
-  agencyId            String
-  agency              User      @relation("PaymentAgency", fields: [agencyId], references: [id])
-  invoiceId           String?
-  amount              Decimal   @db.Decimal(18, 4)
-  currency            String    @default("USD")
-  status              String    @default("CREATED")
-  paymentMethod       String    @default("ach")
-
-  // Conduit references
-  conduitPaymentId    String?
-  conduitDepositRef   String?
-
-  fundedAt            DateTime?
-  completedAt         DateTime?
-  failedAt            DateTime?
-  failureReason       String?
-  failureStage        String?
-
-  metadata            Json      @default("{}")
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-
-  payouts             PaymentPayout[]
-  providerOperations  ProviderOperation[] @relation("PaymentOperations")
-
-  @@index([agencyId, status])
-  @@index([brandId, status])
-  @@index([conduitPaymentId])
-  @@map("payments")
-}
-
-// ─────────────────────────── PAYOUT (Agency → Talent / External) ───────────────────────────
-
-model PaymentPayout {
-  id                     String    @id @default(uuid())
-  payoutNumber           String    @unique
-  paymentId              String?
-  payment                Payment?  @relation(fields: [paymentId], references: [id])
-  agencyId               String
-  agency                 User      @relation("PayoutAgency", fields: [agencyId], references: [id])
-  talentId               String?
-  talent                 User?     @relation("TalentPayouts", fields: [talentId], references: [id])
-  amount                 Decimal   @db.Decimal(18, 4)
-  currency               String    @default("USD")
-  payoutType             String    @default("domestic")   // domestic, international, agency_withdrawal
-  status                 String    @default("CREATED")
-
-  // Conduit references
-  conduitPayoutId        String?
-  conduitOrderId         String?
-  conduitQuoteId         String?
-  destinationAccountGuid String?
-
-  // Failure tracking
-  failedAt               DateTime?
-  failureReason          String?
-  failureStage           String?
-
-  // FX info (international)
-  fxRate                 Decimal?  @db.Decimal(18, 4)
-  fxFee                  Decimal?  @db.Decimal(18, 4)
-  destinationAmount      Decimal?  @db.Decimal(18, 4)
-  destinationCurrency    String?
-
-  completedAt            DateTime?
-  metadata               Json      @default("{}")
-  idempotencyKey         String?   @unique
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
-
-  providerOperations     ProviderOperation[] @relation("PayoutOperations")
-
-  @@index([agencyId, status])
-  @@index([talentId])
-  @@index([conduitPayoutId])
-  @@index([conduitOrderId])
-  @@map("payment_payouts")
-}
-
-// ─────────────────────────── PROVIDER OPERATIONS ───────────────────────────
-
-model ProviderOperation {
-  id                  String    @id @default(uuid())
-  provider            String    @default("conduit")
-  operationType       String    // 'transfer', 'trade', 'quote', 'plan', 'execution', 'kyb_verification'
-  operationGuid       String
-  paymentId           String?
-  payment             Payment?  @relation("PaymentOperations", fields: [paymentId], references: [id])
-  payoutId            String?
-  payout              PaymentPayout? @relation("PayoutOperations", fields: [payoutId], references: [id])
-  status              String
-  rawResponse         Json      @default("{}")
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-
-  @@unique([provider, operationType, operationGuid])
-  @@map("provider_operations")
+enum PaymentAttemptStatus {
+  requested
+  submitted
+  accepted
+  settled
+  failed
+  unknown
 }
 
 // ─────────────────────────── DOUBLE-ENTRY LEDGER ───────────────────────────
 
 model LedgerAccount {
-  id                  String    @id @default(uuid())
-  accountCode         String    @unique   // e.g. 'AGENCY:userId:USD', 'BRAND:userId:RECEIVABLE'
-  accountType         String              // asset, liability, equity, revenue, expense
-  name                String
-  currency            String    @default("USD")
-  ownerId             String?             // userId
-  ownerType           String?             // brand, agency, system
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  id             String               @id @default(uuid())
+  accountCode    String               @unique // e.g. 'AGENCY:userId:USD', 'BRAND:userId:RECEIVABLE'
+  accountType    String // asset, liability, equity, revenue, expense
+  name           String
+  currency       String               @default("USD")
+  ownerId        String? // userId
+  ownerType      String? // brand, agency, system
+  organizationId String?
+  organization   Organization?        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  participantId  String?
+  participant    Participant?         @relation(fields: [participantId], references: [id], onDelete: Restrict)
+  purpose        LedgerAccountPurpose @default(general)
+  status         LedgerAccountStatus  @default(active)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
 
+  postings LedgerPosting[]
+
+  @@index([organizationId, purpose, currency])
+  @@index([participantId, purpose, currency])
   @@map("ledger_accounts")
 }
 
+enum LedgerAccountPurpose {
+  general
+  provider_cash
+  settlement_clearing
+  talent_ap_balance
+  withdrawal_clearing
+  fee_revenue
+  fx_position
+}
+
+enum LedgerAccountStatus {
+  active
+  frozen
+  closed
+}
+
 model JournalEntry {
-  id                  String    @id @default(uuid())
-  debitAccountId      String
-  creditAccountId     String
-  amount              Decimal   @db.Decimal(18, 4)
-  currency            String    @default("USD")
-  status              String    @default("posted")  // posted, pending, reversed
-  referenceType       String    // PAYMENT, PAYOUT, FEE, TRADE, REFUND
-  referenceId         String?
-  providerReference   String?
-  description         String    @default("")
-  postedAt            DateTime  @default(now())
-  createdAt           DateTime  @default(now())
+  id                String   @id @default(uuid())
+  debitAccountId    String
+  creditAccountId   String
+  amount            Decimal  @db.Decimal(18, 4)
+  currency          String   @default("USD")
+  status            String   @default("posted") // posted, pending, reversed
+  referenceType     String // PAYMENT, PAYOUT, FEE, TRADE, REFUND
+  referenceId       String?
+  providerReference String?
+  description       String   @default("")
+  postedAt          DateTime @default(now())
+  createdAt         DateTime @default(now())
 
   // Immutable — no updatedAt
   @@index([debitAccountId, status])
@@ -866,26 +891,281 @@ model JournalEntry {
   @@map("journal_entries")
 }
 
+model LedgerTransaction {
+  id                   String                  @id @default(uuid())
+  transactionType      String
+  status               LedgerTransactionStatus @default(posted)
+  currency             String
+  idempotencyKey       String                  @unique
+  referenceType        String
+  referenceId          String?
+  paymentInstructionId String?
+  paymentInstruction   PaymentInstruction?     @relation(fields: [paymentInstructionId], references: [id], onDelete: Restrict)
+  description          String                  @default("")
+  metadata             Json                    @default("{}")
+  postedAt             DateTime?
+  reversalOfId         String?                 @unique
+  reversalOf           LedgerTransaction?      @relation("LedgerTransactionReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedBy           LedgerTransaction?      @relation("LedgerTransactionReversal")
+  createdAt            DateTime                @default(now())
+
+  postings LedgerPosting[]
+
+  @@index([paymentInstructionId, status])
+  @@index([referenceType, referenceId])
+  @@index([status, createdAt])
+  @@map("ledger_transactions")
+}
+
+enum LedgerTransactionStatus {
+  pending
+  posted
+  reversed
+}
+
+model LedgerPosting {
+  id            String            @id @default(uuid())
+  transactionId String
+  transaction   LedgerTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  accountId     String
+  account       LedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  side          LedgerPostingSide
+  amount        Decimal           @db.Decimal(18, 4)
+  currency      String
+  createdAt     DateTime          @default(now())
+
+  @@index([accountId, side])
+  @@index([transactionId])
+  @@map("ledger_postings")
+}
+
+enum LedgerPostingSide {
+  debit
+  credit
+}
+
+model TalentBalanceLot {
+  id                   String                 @id @default(uuid())
+  participantId        String
+  participant          Participant            @relation(fields: [participantId], references: [id], onDelete: Restrict)
+  paymentInstructionId String                 @unique
+  paymentInstruction   PaymentInstruction     @relation(fields: [paymentInstructionId], references: [id], onDelete: Restrict)
+  currency             String
+  originalAmount       Decimal                @db.Decimal(18, 4)
+  availableAmount      Decimal                @db.Decimal(18, 4)
+  heldAmount           Decimal                @default(0) @db.Decimal(18, 4)
+  withdrawnAmount      Decimal                @default(0) @db.Decimal(18, 4)
+  convertedAmount      Decimal                @default(0) @db.Decimal(18, 4)
+  status               TalentBalanceLotStatus @default(pending)
+  availableAt          DateTime?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  events              TalentBalanceEvent[]
+  balanceReservations TalentBalanceReservation[]
+
+  @@index([participantId, currency, status])
+  @@map("talent_balance_lots")
+}
+
+enum TalentBalanceLotStatus {
+  pending
+  available
+  held
+  partially_withdrawn
+  withdrawn
+  partially_converted
+  converted
+  reversed
+}
+
+model TalentBalanceEvent {
+  id             String                 @id @default(uuid())
+  lotId          String
+  lot            TalentBalanceLot       @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  eventType      TalentBalanceEventType
+  amount         Decimal                @db.Decimal(18, 4)
+  availableAfter Decimal                @db.Decimal(18, 4)
+  heldAfter      Decimal                @db.Decimal(18, 4)
+  withdrawnAfter Decimal                @db.Decimal(18, 4)
+  convertedAfter Decimal                @default(0) @db.Decimal(18, 4)
+  referenceType  String
+  referenceId    String
+  idempotencyKey String                 @unique
+  reason         String?
+  createdAt      DateTime               @default(now())
+
+  @@index([lotId, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("talent_balance_events")
+}
+
+enum TalentBalanceEventType {
+  credited
+  held
+  released
+  withdrawal_reserved
+  withdrawal_settled
+  withdrawal_failed
+  reversed
+  converted_out
+  converted_in
+  conversion_reserved
+}
+
+model TalentBalanceReservation {
+  id                   String                      @id @default(uuid())
+  paymentInstructionId String
+  paymentInstruction   PaymentInstruction          @relation(fields: [paymentInstructionId], references: [id], onDelete: Restrict)
+  lotId                String
+  lot                  TalentBalanceLot            @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  amount               Decimal                     @db.Decimal(18, 4)
+  status               WithdrawalReservationStatus @default(reserved)
+  reservationType      BalanceReservationType      @default(withdrawal)
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
+
+  @@unique([paymentInstructionId, lotId])
+  @@index([lotId, status])
+  @@map("talent_withdrawal_reservations")
+}
+
+enum WithdrawalReservationStatus {
+  reserved
+  settled
+  released
+}
+
+enum BalanceReservationType {
+  withdrawal
+  fx_conversion
+}
+
+model FxQuote {
+  id                  String        @id @default(uuid())
+  participantId       String
+  participant         Participant   @relation(fields: [participantId], references: [id], onDelete: Restrict)
+  requestedById       String
+  requestedBy         User          @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+  provider            String
+  providerQuoteId     String
+  sourceCurrency      String
+  destinationCurrency String
+  sourceAmount        Decimal       @db.Decimal(18, 4)
+  destinationAmount   Decimal       @db.Decimal(18, 4)
+  exchangeRate        Decimal       @db.Decimal(24, 12)
+  feeAmount           Decimal       @default(0) @db.Decimal(18, 4)
+  feeCurrency         String
+  status              FxQuoteStatus @default(active)
+  expiresAt           DateTime
+  idempotencyScope    String
+  idempotencyKey      String
+  payloadHash         String
+  providerResponse    Json          @default("{}")
+  createdAt           DateTime      @default(now())
+
+  conversion FxConversion?
+
+  @@unique([idempotencyScope, idempotencyKey])
+  @@unique([provider, providerQuoteId])
+  @@index([participantId, status, expiresAt])
+  @@map("fx_quotes")
+}
+
+enum FxQuoteStatus {
+  active
+  consumed
+  expired
+  cancelled
+}
+
+model FxConversion {
+  id                   String             @id @default(uuid())
+  quoteId              String             @unique
+  quote                FxQuote            @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  paymentInstructionId String             @unique
+  paymentInstruction   PaymentInstruction @relation(fields: [paymentInstructionId], references: [id], onDelete: Restrict)
+  provider             String
+  providerConversionId String?
+  status               FxConversionStatus @default(requested)
+  idempotencyKey       String             @unique
+  failureCode          String?
+  failureReason        String?
+  providerResponse     Json               @default("{}")
+  settledAt            DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@unique([provider, providerConversionId])
+  @@index([status, createdAt])
+  @@map("fx_conversions")
+}
+
+enum FxConversionStatus {
+  requested
+  submitted
+  processing
+  settled
+  failed
+  review_required
+}
+
 // ─────────────────────────── RECONCILIATION ───────────────────────────
 
 model ReconciliationRecord {
-  id                  String    @id @default(uuid())
-  reconciliationType  String    // 'balance', 'transfer', 'trade'
-  entityType          String    // 'payment', 'payout'
-  entityId            String?
-  providerState       String?
-  internalState       String?
-  providerAmount      Decimal?  @db.Decimal(18, 4)
-  internalAmount      Decimal?  @db.Decimal(18, 4)
-  discrepancyType     String?   // 'status_mismatch', 'amount_mismatch', 'missing_internal', 'missing_provider'
-  resolution          String?   @default("unresolved")
-  resolvedAt          DateTime?
-  resolvedBy          String?
-  notes               String?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  id                 String    @id @default(uuid())
+  reconciliationType String // 'balance', 'transfer', 'trade'
+  entityType         String // 'payment', 'payout'
+  entityId           String?
+  providerState      String?
+  internalState      String?
+  providerAmount     Decimal?  @db.Decimal(18, 4)
+  internalAmount     Decimal?  @db.Decimal(18, 4)
+  discrepancyType    String? // 'status_mismatch', 'amount_mismatch', 'missing_internal', 'missing_provider'
+  resolution         String?   @default("unresolved")
+  resolvedAt         DateTime?
+  resolvedBy         String?
+  notes              String?
+  dedupeKey          String?   @unique
+  provider           String?
+  externalReference  String?
+  expectedCurrency   String?
+  providerCurrency   String?
+  severity           String    @default("error")
+  lastCheckedAt      DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   @@index([resolution, createdAt])
   @@map("reconciliation_records")
 }
 
+model ProviderWebhookEvent {
+  id              String                     @id @default(uuid())
+  provider        String
+  externalEventId String
+  eventType       String
+  payloadHash     String
+  payload         Json
+  status          ProviderWebhookEventStatus @default(received)
+  attempts        Int                        @default(0)
+  error           String?
+  occurredAt      DateTime?
+  receivedAt      DateTime                   @default(now())
+  processedAt     DateTime?
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+
+  @@unique([provider, externalEventId])
+  @@index([status, receivedAt])
+  @@index([provider, eventType, occurredAt])
+  @@map("provider_webhook_events")
+}
+
+enum ProviderWebhookEventStatus {
+  received
+  processing
+  processed
+  ignored
+  failed
+}

@@ -13,6 +13,8 @@ export interface VerifiedBankAccount {
   bankName: string;
   accountName?: string;
   accountNumberMask: string;
+  /** Full number is transient and must never be persisted or logged. */
+  accountNumber?: string;
   routingNumber: string;
   accountHolderName: string;
   subtype?: string;
@@ -24,6 +26,13 @@ export interface VerifiedBankAccount {
 
 export interface IBankVerificationProvider {
   createLinkToken(userId: string): Promise<CreateLinkTokenResponse>;
-  exchangePublicToken(request: ExchangePublicTokenRequest): Promise<{ accessToken: string; itemId: string; accounts: VerifiedBankAccount[] }>;
-  getAccountDetails(accessToken: string, accountId: string): Promise<VerifiedBankAccount>;
+  exchangePublicToken(request: ExchangePublicTokenRequest): Promise<{
+    accessToken: string;
+    itemId: string;
+    accounts: VerifiedBankAccount[];
+  }>;
+  getAccountDetails(
+    accessToken: string,
+    accountId: string,
+  ): Promise<VerifiedBankAccount>;
 }

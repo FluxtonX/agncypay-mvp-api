@@ -1,657 +1,371 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { ProviderMappingStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { PlaidProvider } from '../infrastructure/providers/plaid/plaid.provider';
-import { ConduitProvider } from '../infrastructure/providers/conduit/conduit.provider';
+import { PAYMENT_PROVIDER } from '../core/interfaces/payment-provider.interface';
+import type { PaymentProvider } from '../core/interfaces/payment-provider.interface';
 import { AuditLogsService } from '../modules/audit-logs/audit-logs.service';
-import { encryptText, decryptText } from '../common/utils/crypto.util';
+import { encryptText } from '../common/utils/crypto.util';
+
+interface TalentKycInput {
+  legalFullName: string;
+  dateOfBirth: string;
+  country: string;
+  street: string;
+  city: string;
+  state?: string;
+  postalCode: string;
+  nationalIdLast4?: string;
+}
 
 @Injectable()
 export class VerificationService {
-  private readonly logger = new Logger(VerificationService.name);
-
   constructor(
     private readonly prisma: PrismaService,
-    private readonly plaidProvider: PlaidProvider,
-    private readonly conduitProvider: ConduitProvider,
+    @Inject(PAYMENT_PROVIDER) private readonly paymentProvider: PaymentProvider,
     private readonly auditLogsService: AuditLogsService,
   ) {}
 
-  async getVerificationState(userId: string) {
-    const [
-      user,
-      businessProfile,
-      representative,
-      authorization,
-      brandVerification,
-      bankDetails,
-      documents,
-      conduitCustomer,
-    ] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, kybStatus: true } }),
-      this.prisma.businessProfile.findUnique({ where: { userId } }),
-      this.prisma.representative.findUnique({ where: { userId } }),
-      this.prisma.authorization.findUnique({ where: { userId } }),
-      this.prisma.brandVerification.findUnique({ where: { userId } }),
-      this.prisma.bankDetails.findUnique({ where: { userId } }),
-      this.prisma.document.findMany({ where: { userId } }),
-      this.prisma.conduitCustomer.findUnique({
-        where: { userId },
-        include: { virtualAccounts: true },
-      }),
-    ]);
-
-    const effectiveKybStatus = user?.kybStatus || conduitCustomer?.kybStatus || (businessProfile?.legalName ? 'pending' : 'not_started');
-
-    return {
-      businessProfile,
-      representative,
-      authorization,
-      brandVerification,
-      bankDetails,
-      documents,
-      conduitCustomer,
-      kybStatus: effectiveKybStatus,
-      legalEntityId: conduitCustomer?.conduitCustomerId || null,
-      depositAccount: conduitCustomer?.virtualAccounts?.[0] || null,
-    };
-  }
-
-  private async resolveAgencyUserId(userId?: string): Promise<string> {
-    if (userId) return userId;
-    const defaultAgency = await this.prisma.user.findFirst({
-      where: { accountType: 'agency', deletedAt: null },
-      orderBy: { createdAt: 'desc' },
-    });
-    return defaultAgency?.id || 'b40cf746-543a-48ce-9c28-b6e97c427f22';
-  }
-
-  async createPlaidLinkToken(userId?: string) {
-    const targetUserId = await this.resolveAgencyUserId(userId);
-    return this.plaidProvider.createLinkToken(targetUserId);
-  }
-
-  async exchangePlaidPublicToken(userId: string | undefined, publicToken: string, institutionMetadata?: any) {
-    const targetUserId = await this.resolveAgencyUserId(userId);
-    const result = await this.plaidProvider.exchangePublicToken({ userId: targetUserId, publicToken });
-    const primaryAccount = result.accounts[0];
-
-    const encryptedAccessToken = encryptText(result.accessToken);
-    const encryptedAccountId = primaryAccount?.accountId ? encryptText(primaryAccount.accountId) : null;
-    const encryptedItemId = result.itemId ? encryptText(result.itemId) : null;
-
-    const bankName = institutionMetadata?.name || primaryAccount?.bankName || 'Verified Bank Account';
-
-    const bankDetails = await this.prisma.bankDetails.upsert({
-      where: { userId: targetUserId },
-      update: {
-        bankName,
-        accountNumber: `****${primaryAccount?.accountNumberMask || '6789'}`,
-        routingNumber: primaryAccount?.routingNumber || '111000025',
-        accountHolderName: primaryAccount?.accountHolderName || 'Verified Account Holder',
-        plaidAccessToken: encryptedAccessToken,
-        plaidAccountId: encryptedAccountId,
-        plaidItemId: encryptedItemId,
-        status: 'approved',
-      },
-      create: {
-        userId: targetUserId,
-        bankName,
-        accountNumber: `****${primaryAccount?.accountNumberMask || '6789'}`,
-        routingNumber: primaryAccount?.routingNumber || '111000025',
-        accountHolderName: primaryAccount?.accountHolderName || 'Verified Account Holder',
-        plaidAccessToken: encryptedAccessToken,
-        plaidAccountId: encryptedAccountId,
-        plaidItemId: encryptedItemId,
-        status: 'approved',
-      },
-    });
-
-    // Save all accounts returned by Plaid into agencyExternalAccount table
-    for (const acc of result.accounts) {
-      const extAccountId = acc.accountId || `plaid_${bankDetails.id}_${acc.accountNumberMask}`;
-      await this.prisma.agencyExternalAccount.upsert({
-        where: { providerExternalAccountId: extAccountId },
-        update: {
-          accountName: acc.accountName || acc.accountHolderName || `${bankName} Checking`,
-          bankName,
-          accountNumberMask: acc.accountNumberMask || '6789',
-          routingNumber: acc.routingNumber || '111000025',
-          isPrimary: acc.accountId === primaryAccount?.accountId,
-        },
-        create: {
-          agencyId: targetUserId,
-          accountName: acc.accountName || acc.accountHolderName || `${bankName} Checking`,
-          bankName,
-          accountNumberMask: acc.accountNumberMask || '6789',
-          routingNumber: acc.routingNumber || '111000025',
-          providerExternalAccountId: extAccountId,
-          isPrimary: acc.accountId === primaryAccount?.accountId,
-        },
-      });
-    }
-
-    // Plaid to Conduit Recipient registration
-    try {
-      let conduitCustomer = await this.prisma.conduitCustomer.findUnique({
-        where: { userId: targetUserId },
-      });
-      if (!conduitCustomer) {
-        conduitCustomer = await this.prisma.conduitCustomer.create({
-          data: {
-            userId: targetUserId,
-            conduitCustomerId: `cust_agy_${targetUserId.replace(/-/g, '').slice(-12)}`,
-            customerType: 'business',
-            kybStatus: 'approved',
-            status: 'active',
-          },
-        });
-      }
-
-      const conduitRec = await this.conduitProvider.createRecipient({
-        customerId: conduitCustomer.conduitCustomerId,
-        name: primaryAccount?.accountHolderName || bankName,
-        type: 'business',
-        payoutRail: 'ach',
-        accountNumber: primaryAccount?.accountNumberMask || '6789',
-        routingNumber: primaryAccount?.routingNumber || '021000021',
-        bankName,
-      });
-
-      await this.prisma.conduitRecipient.upsert({
-        where: { recipientId: conduitRec.id },
-        update: {
-          name: conduitRec.name,
-          accountNumberMask: primaryAccount?.accountNumberMask || '6789',
-          routingNumber: primaryAccount?.routingNumber || '021000021',
-          status: 'active',
-        },
-        create: {
-          conduitCustomerId: conduitCustomer.id,
-          recipientId: conduitRec.id,
-          name: conduitRec.name,
-          recipientType: 'business',
-          status: 'active',
-          payoutRail: 'ach',
-          accountNumberMask: primaryAccount?.accountNumberMask || '6789',
-          routingNumber: primaryAccount?.routingNumber || '021000021',
-        },
-      });
-    } catch (err: any) {
-      this.logger.warn(`Could not register Plaid account with Conduit recipient: ${err.message}`);
-    }
-
-    await this.auditLogsService.log({
-      userId: targetUserId,
-      action: 'BANK_VERIFIED_PLAID',
-      entityType: 'BankDetails',
-      entityId: bankDetails.id,
-      details: { bankName, totalAccounts: result.accounts.length, accounts: result.accounts.map(a => a.accountNumberMask) },
-    });
-
-    return { success: true, bankDetails, accounts: result.accounts };
-  }
-
-  async linkPlaidSandboxAccount(userId?: string, institutionId = 'ins_3') {
-    const targetUserId = await this.resolveAgencyUserId(userId);
-    const publicToken = await this.plaidProvider.createSandboxPublicToken(institutionId);
-    return this.exchangePlaidPublicToken(targetUserId, publicToken);
-  }
-
-  async getLinkedAccounts(userId?: string) {
-    const targetUserId = await this.resolveAgencyUserId(userId);
-    const externalAccounts = await this.prisma.agencyExternalAccount.findMany({
-      where: { agencyId: targetUserId },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    const bankDetails = await this.prisma.bankDetails.findUnique({
-      where: { userId: targetUserId },
-    });
-
-    return {
-      success: true,
-      bankDetails,
-      accounts: externalAccounts,
-    };
-  }
-
-  async disconnectAccount(userId: string | undefined, accountId: string) {
-    const targetUserId = await this.resolveAgencyUserId(userId);
-    // Delete matching agencyExternalAccount
-    await this.prisma.agencyExternalAccount.deleteMany({
+  private async organizationForUser(userId: string) {
+    const organization = await this.prisma.organization.findFirst({
       where: {
-        agencyId: targetUserId,
-        OR: [
-          { id: accountId },
-          { providerExternalAccountId: accountId },
-        ],
+        status: 'active',
+        deletedAt: null,
+        type: { in: ['brand', 'agency'] },
+        participants: {
+          some: {
+            status: 'active',
+            participant: { users: { some: { userId } } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!organization) {
+      throw new ForbiddenException(
+        'An active Brand or Agency organization is required',
+      );
+    }
+    return organization;
+  }
+
+  async getVerificationState(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        accountType: true,
+        kybStatus: true,
+        businessProfile: true,
+        representative: true,
       },
     });
-
-    // Check if any external accounts remain
-    const remaining = await this.prisma.agencyExternalAccount.count({
-      where: { agencyId: targetUserId },
+    if (!user) throw new NotFoundException('User not found');
+    const participantLink = await this.prisma.participantUser.findUnique({
+      where: { userId },
+      include: {
+        participant: {
+          include: {
+            organizations: {
+              where: { status: 'active' },
+              include: {
+                organization: {
+                  include: {
+                    providerParties: {
+                      where: { provider: this.paymentProvider.name },
+                    },
+                    financialAccounts: { where: { deletedAt: null } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     });
-
-    if (remaining === 0) {
-      await this.prisma.bankDetails.deleteMany({
-        where: { userId: targetUserId },
-      });
-    }
-
-    return { success: true, remaining };
-  }
-
-  async updateBusinessProfile(userId: string, data: any) {
-    const allowedFields: Record<string, any> = {
-      legalName: data.legalName,
-      brandName: data.brandName || data.tradeName,
-      businessType: data.businessType,
-      country: data.country,
-      registrationNumber: data.registrationNumber,
-      taxId: data.taxId,
-      website: data.website,
-      email: data.email,
-      phone: data.phone,
-      industry: data.industry,
-      address: data.address,
-      addressLine1: data.addressLine1,
-      addressLine2: data.addressLine2,
-      city: data.city,
-      businessState: data.businessState || data.stateOrProvince,
-      stateOrProvince: data.stateOrProvince || data.businessState,
-      zipCode: data.zipCode || data.postalCode,
-      postalCode: data.postalCode || data.zipCode,
-      companyDescription: data.companyDescription,
-      firstName: data.firstName,
-      lastName: data.lastName,
-      dob: data.dob,
-      ssnLast4: data.ssnLast4,
+    return {
+      accountType: user.accountType,
+      verificationStatus: user.kybStatus || 'not_started',
+      businessProfile: user.businessProfile,
+      representative: user.representative,
+      organizations:
+        participantLink?.participant.organizations.map(({ organization }) => ({
+          id: organization.id,
+          name: organization.name,
+          type: organization.type,
+          providerMappings: organization.providerParties.map((mapping) => ({
+            provider: mapping.provider,
+            status: mapping.status,
+          })),
+          financialAccounts: organization.financialAccounts.map((account) => ({
+            id: account.id,
+            type: account.type,
+            status: account.status,
+            currency: account.currency,
+            institutionName: account.institutionName,
+            lastFour: account.lastFour,
+          })),
+        })) || [],
     };
-
-    const cleanData = Object.fromEntries(
-      Object.entries(allowedFields).filter(([_, v]) => v !== undefined && v !== null)
-    );
-
-    const profile = await this.prisma.businessProfile.upsert({
-      where: { userId },
-      update: cleanData,
-      create: { userId, ...cleanData },
-    });
-    await this.auditLogsService.log({ userId, action: 'BUSINESS_PROFILE_UPDATED', entityType: 'BusinessProfile', entityId: profile.id });
-    return profile;
   }
 
-  async updateRepresentative(userId: string, data: any) {
-    const allowedFields: Record<string, any> = {
-      fullName: data.fullName,
-      jobTitle: data.jobTitle,
-      dob: data.dob,
-      nationality: data.nationality,
-      email: data.email,
-      phone: data.phone,
-      address: data.address,
-      idType: data.idType,
-      idFrontUploaded: data.idFrontUploaded,
-      idBackUploaded: data.idBackUploaded,
-      selfieUploaded: data.selfieUploaded,
-    };
-
-    const cleanData = Object.fromEntries(
-      Object.entries(allowedFields).filter(([_, v]) => v !== undefined && v !== null)
-    );
-
-    const rep = await this.prisma.representative.upsert({
-      where: { userId },
-      update: cleanData,
-      create: { userId, ...cleanData },
-    });
-    await this.auditLogsService.log({ userId, action: 'REPRESENTATIVE_UPDATED', entityType: 'Representative', entityId: rep.id });
-    return rep;
+  getOnboardingRequirements(country = 'USA') {
+    return this.paymentProvider.discoverOnboardingRequirements(country);
   }
 
-  async updateAuthorization(userId: string, data: any) {
-    const auth = await this.prisma.authorization.upsert({
-      where: { userId },
-      update: data,
-      create: { userId, ...data },
-    });
-    await this.auditLogsService.log({ userId, action: 'AUTHORIZATION_UPDATED', entityType: 'Authorization', entityId: auth.id });
-    return auth;
-  }
-
-  async updateBankDetails(userId: string, data: any) {
-    const bank = await this.prisma.bankDetails.upsert({
-      where: { userId },
-      update: data,
-      create: { userId, ...data },
-    });
-    await this.auditLogsService.log({ userId, action: 'BANK_DETAILS_UPDATED', entityType: 'BankDetails', entityId: bank.id });
-    return bank;
-  }
-
-  async getOnboardingRequirements(country = 'USA') {
-    return this.conduitProvider.discoverOnboardingRequirements(country);
-  }
-
-  async submitLegalEntity(userId: string) {
+  async submitOrganizationOnboarding(userId: string) {
+    const organization = await this.organizationForUser(userId);
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException(`User ${userId} not found`);
-    }
-
-    const [businessProfile, representative] = await Promise.all([
+    if (!user) throw new NotFoundException('User not found');
+    const [business, representative] = await Promise.all([
       this.prisma.businessProfile.findUnique({ where: { userId } }),
       this.prisma.representative.findUnique({ where: { userId } }),
     ]);
-
-    // 1. Submit Onboarding Application to Conduit v2 (POST /v2/onboarding)
-    const legalName = businessProfile?.legalName || user.fullName || 'Registered Business';
-    const taxId = businessProfile?.taxId || `XX-XXXXXXX`;
-    const country = businessProfile?.country || 'USA';
-
-    const repNames = (representative?.fullName || user.fullName || 'Business Officer').trim().split(/\s+/);
-    const firstName = repNames[0] || 'Officer';
-    const lastName = repNames.slice(1).join(' ') || 'Admin';
-
-    const onboardingRes = await this.conduitProvider.submitCustomerOnboarding({
-      clientReferenceId: userId,
+    if (!business?.legalName || !business.country || !business.taxId) {
+      throw new BadRequestException(
+        'Legal name, country, and tax ID are required before provider onboarding',
+      );
+    }
+    if (!representative?.fullName || !representative.email) {
+      throw new BadRequestException(
+        'An authorized representative is required before provider onboarding',
+      );
+    }
+    const result = await this.paymentProvider.submitOnboarding({
+      clientReferenceId: organization.id,
+      customerType: 'business',
       businessInfo: {
-        legalName,
-        tradeName: businessProfile?.brandName || legalName,
-        taxId,
-        country,
-        website: businessProfile?.website || 'https://agncypay.com',
-        industry: businessProfile?.industry || 'media_and_advertising',
-        email: businessProfile?.email || user.email,
-        phone: businessProfile?.phone || representative?.phone || '+15551234567',
+        legalName: business.legalName,
+        tradeName: business.brandName || business.legalName,
+        taxId: business.taxId,
+        country: business.country,
+        website: business.website,
+        industry: business.industry,
+        email: business.email || user.email,
+        phone: business.phone,
         address: {
-          line1: businessProfile?.addressLine1 || businessProfile?.address || '100 Financial Way',
-          city: businessProfile?.city || 'New York',
-          state: businessProfile?.businessState || 'NY',
-          postalCode: businessProfile?.zipCode || '10001',
-          country,
+          line1: business.addressLine1 || business.address,
+          line2: business.addressLine2,
+          city: business.city,
+          state: business.stateOrProvince || business.businessState,
+          postalCode: business.postalCode || business.zipCode,
+          country: business.country,
         },
       },
       ownership: {
-        persons: [
-          {
-            referenceId: `person_${userId}`,
-            firstName,
-            lastName,
-            email: representative?.email || user.email,
-            roles: ['BUSINESS_ADMIN', 'CONTROL_PERSON'],
-            phone: representative?.phone || '+15551234567',
-            dob: representative?.dob ? new Date(representative.dob).toISOString().split('T')[0] : '1990-01-01',
+        representative: {
+          fullName: representative.fullName,
+          email: representative.email,
+          phone: representative.phone,
+          dateOfBirth: representative.dob,
+        },
+      },
+      metadata: { organizationId: organization.id },
+    });
+    const providerStatus: ProviderMappingStatus =
+      result.status === 'approved' || result.status === 'active'
+        ? 'active'
+        : 'pending';
+    const externalId = result.customerId || result.id;
+    const existing = await this.prisma.providerPartyMap.findFirst({
+      where: {
+        organizationId: organization.id,
+        provider: this.paymentProvider.name,
+      },
+    });
+    const mapping = existing
+      ? await this.prisma.providerPartyMap.update({
+          where: { id: existing.id },
+          data: {
+            externalId,
+            status: providerStatus,
+            metadata: { onboardingId: result.id },
           },
-        ],
-      },
-    });
-
-    const effectiveKybStatus = onboardingRes.status === 'approved' ? 'approved' : 'pending';
-    const effectiveStatus = onboardingRes.status === 'approved' ? 'active' : 'pending';
-    const conduitCustomerId = onboardingRes.customerId || `cust_${userId}`;
-
-    // 2. Persist ConduitCustomer in DB
-    const conduitCustomer = await this.prisma.conduitCustomer.upsert({
-      where: { userId },
-      update: {
-        conduitCustomerId,
-        applicationId: onboardingRes.id,
-        kybStatus: effectiveKybStatus,
-        status: effectiveStatus,
-        country,
-      },
-      create: {
-        userId,
-        conduitCustomerId,
-        applicationId: onboardingRes.id,
-        customerType: 'business',
-        kybStatus: effectiveKybStatus,
-        status: effectiveStatus,
-        country,
-      },
-    });
-
-    // 3. Update User KYB Status
+        })
+      : await this.prisma.providerPartyMap.create({
+          data: {
+            organizationId: organization.id,
+            provider: this.paymentProvider.name,
+            partyType: 'business',
+            externalId,
+            status: providerStatus,
+            metadata: { onboardingId: result.id },
+          },
+        });
+    const verificationStatus =
+      providerStatus === 'active' ? 'approved' : 'pending';
     await this.prisma.user.update({
       where: { id: userId },
-      data: { kybStatus: effectiveKybStatus },
+      data: { kybStatus: verificationStatus },
     });
-
-    // 4. Provision Conduit Virtual Deposit Account (Step 2)
-    const virtualAccount = await this.provisionVirtualAccount(userId);
-
     await this.auditLogsService.log({
       userId,
-      action: 'LEGAL_ENTITY_SUBMITTED_CONDUIT',
-      entityType: 'ConduitCustomer',
-      entityId: conduitCustomer.id,
+      action: 'PROVIDER_ONBOARDING_SUBMITTED',
+      entityType: 'ProviderPartyMap',
+      entityId: mapping.id,
       details: {
-        conduitCustomerId,
-        applicationId: onboardingRes.id,
-        kybStatus: effectiveKybStatus,
-        virtualAccountId: virtualAccount?.virtualAccountId,
+        provider: this.paymentProvider.name,
+        organizationId: organization.id,
       },
     });
-
     return {
-      success: true,
-      legalEntityId: conduitCustomerId,
-      applicationId: onboardingRes.id,
-      kybStatus: effectiveKybStatus,
-      conduitCustomer,
-      virtualAccount,
+      provider: this.paymentProvider.name,
+      organizationId: organization.id,
+      status: mapping.status,
     };
   }
 
-  async provisionVirtualAccount(userId: string) {
-    let customer = await this.prisma.conduitCustomer.findUnique({
-      where: { userId },
-      include: { virtualAccounts: true },
-    });
-
-    if (!customer) {
-      customer = await this.prisma.conduitCustomer.create({
-        data: {
-          userId,
-          conduitCustomerId: `cust_${userId}`,
-          customerType: 'business',
-          kybStatus: 'approved',
-          status: 'active',
-        },
-        include: { virtualAccounts: true },
-      });
-    }
-
-    if (customer.virtualAccounts && customer.virtualAccounts.length > 0) {
-      return customer.virtualAccounts[0];
-    }
-
-    // Call Conduit Provider to request virtual account
-    const vaData = await this.conduitProvider.createVirtualAccount({
-      customerId: customer.conduitCustomerId,
-      asset: 'USD',
-    });
-
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    const businessProfile = await this.prisma.businessProfile.findUnique({ where: { userId } });
-
-    const virtualAccount = await this.prisma.conduitVirtualAccount.create({
-      data: {
-        conduitCustomerId: customer.id,
-        virtualAccountId: vaData.id,
-        currency: vaData.currency || 'USD',
-        accountNumber: vaData.accountNumber,
-        routingNumber: vaData.routingNumber,
-        bankName: vaData.bankName,
-        beneficiaryName: vaData.beneficiaryName || businessProfile?.legalName || user?.fullName || 'AgncyPay FBO Client',
+  async provisionDepositAccount(userId: string) {
+    const organization = await this.organizationForUser(userId);
+    const party = await this.prisma.providerPartyMap.findFirst({
+      where: {
+        organizationId: organization.id,
+        provider: this.paymentProvider.name,
         status: 'active',
       },
     });
-
-    await this.auditLogsService.log({
-      userId,
-      action: 'CONDUIT_VIRTUAL_ACCOUNT_PROVISIONED',
-      entityType: 'ConduitVirtualAccount',
-      entityId: virtualAccount.id,
-      details: {
-        virtualAccountId: virtualAccount.virtualAccountId,
-        accountNumberMask: virtualAccount.accountNumber?.slice(-4),
-        routingNumber: virtualAccount.routingNumber,
+    if (!party)
+      throw new BadRequestException('Provider onboarding is not active');
+    const existing = await this.prisma.financialAccount.findFirst({
+      where: {
+        organizationId: organization.id,
+        type: 'virtual_account',
+        status: 'ready',
+        deletedAt: null,
+        providerAccounts: {
+          some: { provider: this.paymentProvider.name, status: 'active' },
+        },
       },
     });
-
-    return virtualAccount;
-  }
-
-  async setupBrandFundingAccount(userId: string, accountNumber: string, routingNumber: string, bankName?: string) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException(`User ${userId} not found`);
+    if (existing) {
+      return {
+        id: existing.id,
+        currency: existing.currency,
+        status: existing.status,
+        institutionName: existing.institutionName,
+        lastFour: existing.lastFour,
+      };
     }
-
-    const mask = accountNumber.length >= 4 ? accountNumber.slice(-4) : 'XXXX';
-    const bankDetails = await this.prisma.bankDetails.upsert({
-      where: { userId },
-      update: {
-        bankName: bankName || 'Brand Linked Bank',
-        accountNumber: `****${mask}`,
-        routingNumber,
-        accountHolderName: user.fullName || 'Brand Partner',
-        status: 'approved',
-      },
-      create: {
-        userId,
-        bankName: bankName || 'Brand Linked Bank',
-        accountNumber: `****${mask}`,
-        routingNumber,
-        accountHolderName: user.fullName || 'Brand Partner',
-        status: 'approved',
+    const result = await this.paymentProvider.createDepositAccount({
+      partyId: party.externalId,
+      currency: 'USD',
+      accountType: 'collection',
+      idempotencyKey: `organization-deposit-${organization.id}-USD`,
+      metadata: { organizationId: organization.id },
+    });
+    const fundingInstructions = {
+      accountNumber: result.accountNumber,
+      routingNumber: result.routingNumber,
+      bankName: result.bankName,
+      beneficiaryName: result.beneficiaryName,
+      currency: result.currency,
+    };
+    const account = await this.prisma.financialAccount.create({
+      data: {
+        organizationId: organization.id,
+        type: 'virtual_account',
+        status:
+          result.status === 'active' || result.status === 'ready'
+            ? 'ready'
+            : 'pending',
+        currency: result.currency,
+        displayName: `${result.currency} collection account`,
+        institutionName: result.bankName,
+        lastFour: result.accountNumber?.slice(-4),
+        metadata: {
+          fundingInstructionsEncrypted: encryptText(
+            JSON.stringify(fundingInstructions),
+          ),
+        },
+        providerAccounts: {
+          create: {
+            provider: this.paymentProvider.name,
+            accountType: 'collection',
+            externalId: result.id,
+            status:
+              result.status === 'active' || result.status === 'ready'
+                ? 'active'
+                : 'pending',
+          },
+        },
       },
     });
-
     await this.auditLogsService.log({
       userId,
-      action: 'BRAND_FUNDING_ACCOUNT_CONFIGURED',
-      entityType: 'BankDetails',
-      entityId: bankDetails.id,
-      details: { bankName: bankDetails.bankName, mask, routingNumber },
+      action: 'PROVIDER_DEPOSIT_ACCOUNT_CREATED',
+      entityType: 'FinancialAccount',
+      entityId: account.id,
+      details: {
+        provider: this.paymentProvider.name,
+        organizationId: organization.id,
+      },
     });
-
     return {
-      success: true,
-      bankDetails,
+      id: account.id,
+      currency: account.currency,
+      status: account.status,
+      fundingInstructions,
     };
   }
 
-  async createPlaidProcessorToken(userId: string, processor = 'conduit') {
-    const bankDetails = await this.prisma.bankDetails.findUnique({ where: { userId } });
-    if (!bankDetails || !bankDetails.plaidAccessToken || !bankDetails.plaidAccountId) {
-      throw new NotFoundException(`Plaid verified bank details not found for user ${userId}`);
-    }
-
-    const decryptedAccessToken = decryptText(bankDetails.plaidAccessToken);
-    const decryptedAccountId = decryptText(bankDetails.plaidAccountId);
-
-    const processorToken = await this.plaidProvider.createProcessorToken(
-      decryptedAccessToken,
-      decryptedAccountId,
-      processor,
-    );
-
-    return { processorToken };
-  }
-
-  async submitTalentKYC(userId: string, data: {
-    legalFullName?: string;
-    dateOfBirth?: string;
-    country?: string;
-    street?: string;
-    city?: string;
-    state?: string;
-    postalCode?: string;
-    nationalIdLast4?: string;
-  }) {
+  async submitTalentKyc(userId: string, data: TalentKycInput) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException(`User ${userId} not found`);
-    }
-
-    if (data.legalFullName) {
-      await this.prisma.user.update({
+    if (!user) throw new NotFoundException('User not found');
+    const address = [data.street, data.city, data.state, data.postalCode]
+      .filter(Boolean)
+      .join(', ');
+    await this.prisma.$transaction([
+      this.prisma.user.update({
         where: { id: userId },
-        data: {
+        data: { fullName: data.legalFullName, kybStatus: 'pending' },
+      }),
+      this.prisma.representative.upsert({
+        where: { userId },
+        update: {
           fullName: data.legalFullName,
-          kybStatus: 'pending',
+          dob: data.dateOfBirth,
+          nationality: data.country,
+          address,
+          status: 'processing',
         },
-      });
-    } else {
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { kybStatus: 'pending' },
-      });
-    }
-
-    const addressStr = [data.street, data.city, data.state, data.postalCode].filter(Boolean).join(', ');
-    await this.prisma.representative.upsert({
-      where: { userId },
-      update: {
-        fullName: data.legalFullName || user.fullName,
-        dob: data.dateOfBirth || '',
-        nationality: data.country || 'US',
-        address: addressStr,
-        status: 'processing',
-      },
-      create: {
-        userId,
-        fullName: data.legalFullName || user.fullName,
-        dob: data.dateOfBirth || '',
-        nationality: data.country || 'US',
-        address: addressStr,
-        status: 'processing',
-      },
-    });
-
+        create: {
+          userId,
+          fullName: data.legalFullName,
+          dob: data.dateOfBirth,
+          nationality: data.country,
+          address,
+          status: 'processing',
+        },
+      }),
+    ]);
     await this.auditLogsService.log({
       userId,
       action: 'TALENT_KYC_SUBMITTED',
-      entityType: 'User',
+      entityType: 'Participant',
       entityId: userId,
       details: {
-        country: data.country || 'US',
-        hasSsn: !!data.nationalIdLast4,
+        country: data.country,
+        hasNationalIdLast4: Boolean(data.nationalIdLast4),
       },
     });
-
-    return {
-      success: true,
-      status: 'pending',
-      message: 'Talent identity verification submitted successfully',
-    };
+    return { success: true, status: 'pending' };
   }
 
   async skipVerification(userId: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException(`User ${userId} not found`);
-    }
-
+    if (!user) throw new NotFoundException('User not found');
     await this.auditLogsService.log({
       userId,
-      action: 'VERIFICATION_SKIPPED',
-      entityType: 'User',
+      action: 'VERIFICATION_DEFERRED',
+      entityType: 'Participant',
       entityId: userId,
-      details: {
-        previousStatus: user.kybStatus,
-        reason: 'User skipped onboarding verification',
-      },
+      details: { previousStatus: user.kybStatus },
     });
-
-    return {
-      success: true,
-      status: 'skipped',
-      message: 'Verification skipped. You can complete verification before initiating payments.',
-    };
+    return { success: true, status: 'deferred' };
   }
 }

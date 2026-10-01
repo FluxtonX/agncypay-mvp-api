@@ -1,7 +1,10 @@
 import * as crypto from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
-const SECRET_KEY = process.env.ENCRYPTION_KEY || process.env.JWT_SECRET || 'agncypay-fintech-encryption-key-32b-secret';
+const SECRET_KEY =
+  process.env.ENCRYPTION_KEY ||
+  process.env.JWT_SECRET ||
+  'agncypay-fintech-encryption-key-32b-secret';
 
 function getKey(): Buffer {
   return crypto.scryptSync(SECRET_KEY, 'agncypay-salt', 32);

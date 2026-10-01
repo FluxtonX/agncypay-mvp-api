@@ -3,15 +3,20 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { ReconciliationService } from './reconciliation.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators';
+import { AuthorizationGuard } from '../../auth/guards/authorization.guard';
+import { OrganizationRoles } from '../../auth/decorators/authorization.decorator';
 
 @ApiTags('Reconciliation')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, AuthorizationGuard)
+@OrganizationRoles('super_admin', 'treasury')
 @Controller('reconciliation')
 export class ReconciliationController {
   constructor(private readonly reconciliationService: ReconciliationService) {}
 
-  @ApiOperation({ summary: 'Trigger safety reconciliation run between Conduit and AgncyPay' })
+  @ApiOperation({
+    summary: 'Trigger safety reconciliation run between Conduit and AgncyPay',
+  })
   @Post('run')
   async triggerReconciliation() {
     return this.reconciliationService.runReconciliation();

@@ -13,11 +13,18 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: configService.get<string>('JWT_SECRET') || 'agncypay-jwt-secret-change-in-production',
+      secretOrKey:
+        configService.get<string>('JWT_SECRET') ||
+        'agncypay-jwt-secret-change-in-production',
     });
   }
 
-  async validate(payload: { sub?: string; id?: string; userId?: string; email?: string }) {
+  async validate(payload: {
+    sub?: string;
+    id?: string;
+    userId?: string;
+    email?: string;
+  }) {
     const userId = payload.sub || payload.id || payload.userId;
     if (!userId && !payload.email) {
       throw new UnauthorizedException('Invalid token payload');

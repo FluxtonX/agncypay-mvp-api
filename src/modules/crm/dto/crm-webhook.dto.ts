@@ -1,13 +1,23 @@
-import { IsString, IsNotEmpty, IsOptional, IsNumber, IsObject } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  IsObject,
+  IsISO8601,
+} from 'class-validator';
 
 export class CrmWebhookDto {
   @IsString()
   @IsNotEmpty()
-  event: string; // e.g. 'talent.sync', 'talent.created', 'payable.created', 'deal.closed'
+  event: string; // e.g. 'talent.sync', 'invoice.created', 'payable.created', 'deal.closed'
 
   @IsOptional()
   @IsString()
-  agencyId?: string;
+  eventId?: string;
+
+  @IsOptional()
+  @IsISO8601()
+  occurredAt?: string;
 
   @IsObject()
   data: Record<string, any>;
@@ -22,7 +32,6 @@ export class CsvRosterImportDto {
     phone?: string;
     country?: string;
     category?: string;
-    splitShare?: number;
     metadata?: Record<string, any>;
   }>;
 }

@@ -1,10 +1,16 @@
-import { Injectable, Logger, UnauthorizedException, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { TalentService } from '../../talents/talent.service';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { ConfigService } from '@nestjs/config';
 import { CrmWebhookDto, CsvRosterImportDto } from './dto/crm-webhook.dto';
-import * as crypto from 'crypto';
+import { InvitationService } from '../../auth/invitation.service';
+import { SourceConnectionsService } from '../source-connections/source-connections.service';
+import { CommercialDocumentsService } from '../commercial-documents/commercial-documents.service';
 
 @Injectable()
 export class CrmService {
@@ -12,75 +18,192 @@ export class CrmService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly talentService: TalentService,
     private readonly auditLogsService: AuditLogsService,
     private readonly configService: ConfigService,
+    private readonly invitationService: InvitationService,
+    private readonly sourceConnections: SourceConnectionsService,
+    private readonly commercialDocuments: CommercialDocumentsService,
   ) {}
 
-  /**
-   * Deterministically generate or verify an agency's CRM Webhook API Key
-   */
-  getAgencyCrmApiKey(agencyId: string): string {
-    const secret = this.configService.get<string>('JWT_SECRET') || 'agncypay-crm-secret-key-2026';
-    const hash = crypto.createHmac('sha256', secret).update(agencyId).digest('hex').slice(0, 32);
-    return `agncy_crm_${hash}`;
-  }
-
-  /**
-   * Validate incoming CRM API Key or identify agency
-   */
-  async resolveAgencyFromApiKey(apiKey: string): Promise<string> {
-    if (!apiKey || !apiKey.startsWith('agncy_crm_')) {
-      throw new UnauthorizedException('Invalid or missing X-AgncyPay-CRM-Key header');
+  private async syncTalentParticipant(input: {
+    agencyId: string;
+    organizationId: string;
+    fullName: string;
+    email?: string;
+    connection?: { id: string; connectorKey: string; externalTenantId: string };
+    externalTalentId?: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    let identity =
+      input.connection && input.externalTalentId
+        ? await this.prisma.externalIdentityMap.findUnique({
+            where: {
+              sourceSystem_sourceTenantId_externalType_externalId: {
+                sourceSystem: input.connection.connectorKey,
+                sourceTenantId: input.connection.externalTenantId,
+                externalType: 'talent',
+                externalId: input.externalTalentId,
+              },
+            },
+            include: {
+              participant: { include: { users: { include: { user: true } } } },
+            },
+          })
+        : null;
+    const mappedUser = identity?.participant?.users[0]?.user;
+    const identityMetadata = (identity?.metadata || {}) as Record<
+      string,
+      unknown
+    >;
+    const email = (
+      input.email ||
+      mappedUser?.email ||
+      identityMetadata.email?.toString() ||
+      ''
+    )
+      .trim()
+      .toLowerCase();
+    if (!email) {
+      throw new BadRequestException(
+        'Talent email is required for permissioned mobile activation',
+      );
     }
-
-    // Find all agencies and check matching hash
-    const agencies = await this.prisma.user.findMany({
-      where: { accountType: 'agency', deletedAt: null },
-      select: { id: true, email: true },
+    let participant = identity?.participant;
+    if (!participant) {
+      const user = await this.prisma.user.findUnique({
+        where: { email },
+        include: {
+          participantLinks: {
+            include: {
+              participant: { include: { users: { include: { user: true } } } },
+            },
+          },
+        },
+      });
+      participant = user?.participantLinks[0]?.participant || null;
+    }
+    if (!participant) {
+      participant = await this.prisma.participant.create({
+        data: { displayName: input.fullName },
+        include: { users: { include: { user: true } } },
+      });
+    } else if (participant.displayName !== input.fullName) {
+      participant = await this.prisma.participant.update({
+        where: { id: participant.id },
+        data: {
+          displayName: input.fullName,
+          status: 'active',
+          deletedAt: null,
+        },
+        include: { users: { include: { user: true } } },
+      });
+    }
+    await this.prisma.organizationParticipant.upsert({
+      where: {
+        organizationId_participantId_relationshipType: {
+          organizationId: input.organizationId,
+          participantId: participant.id,
+          relationshipType: 'talent',
+        },
+      },
+      update: { status: 'active', endsAt: null },
+      create: {
+        organizationId: input.organizationId,
+        participantId: participant.id,
+        relationshipType: 'talent',
+      },
     });
-
-    for (const agency of agencies) {
-      if (this.getAgencyCrmApiKey(agency.id) === apiKey) {
-        return agency.id;
-      }
+    if (input.connection && input.externalTalentId) {
+      await this.prisma.externalIdentityMap.upsert({
+        where: {
+          sourceSystem_sourceTenantId_externalType_externalId: {
+            sourceSystem: input.connection.connectorKey,
+            sourceTenantId: input.connection.externalTenantId,
+            externalType: 'talent',
+            externalId: input.externalTalentId,
+          },
+        },
+        update: {
+          participantId: participant.id,
+          status: 'active',
+          metadata: {
+            ...input.metadata,
+            email,
+            connectionId: input.connection.id,
+          },
+        },
+        create: {
+          participantId: participant.id,
+          sourceSystem: input.connection.connectorKey,
+          sourceTenantId: input.connection.externalTenantId,
+          externalType: 'talent',
+          externalId: input.externalTalentId,
+          metadata: {
+            ...input.metadata,
+            email,
+            connectionId: input.connection.id,
+          },
+        },
+      });
     }
-
-    throw new UnauthorizedException('CRM Webhook key does not match any registered Agency workspace');
+    const activeUser = participant.users[0]?.user;
+    const invitation = activeUser?.emailVerified
+      ? null
+      : await this.invitationService.createForParticipant(
+          input.agencyId,
+          {
+            organizationId: input.organizationId,
+            email,
+            accountType: 'talent',
+            relationshipType: 'talent',
+          },
+          participant.id,
+        );
+    return { participant, email, invitation };
   }
 
-  /**
-   * Get CRM Connection configuration details for an Agency
-   */
+  private async getAgencyOrganizationId(agencyId: string): Promise<string> {
+    const organization = await this.prisma.organization.findFirst({
+      where: {
+        type: 'agency',
+        id: agencyId,
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    if (!organization) {
+      throw new NotFoundException(
+        `Agency organization for ${agencyId} not found`,
+      );
+    }
+    return organization.id;
+  }
+
   async getCrmConfig(agencyId: string) {
-    const agency = await this.prisma.user.findUnique({
-      where: { id: agencyId },
-      select: { id: true, email: true, fullName: true, agncyId: true },
-    });
-
-    if (!agency) {
-      throw new NotFoundException(`Agency ${agencyId} not found`);
-    }
-
-    const apiKey = this.getAgencyCrmApiKey(agencyId);
-    const baseUrl = this.configService.get<string>('APP_URL') || 'https://api.agncypay.internal';
-
+    const connections = (
+      await this.sourceConnections.listOrganizationConnections(agencyId)
+    ).filter((connection) => connection.connectorKey === 'generic_crm');
+    const baseUrl =
+      this.configService.get<string>('APP_URL') ||
+      'https://api.agncypay.internal';
     return {
-      agencyId,
-      agncyId: agency.agncyId,
-      webhookUrl: `${baseUrl}/crm/webhook`,
-      apiKey,
+      connections,
+      webhookUrl: `${baseUrl}/api/v1/crm/webhook`,
       supportedEvents: [
         'talent.created',
         'talent.sync',
         'talent.updated',
         'deal.closed',
+        'invoice.created',
+        'invoice.updated',
         'payable.created',
       ],
       documentation: {
-        header: 'X-AgncyPay-CRM-Key: agncy_crm_...',
+        authenticationHeader:
+          'X-AgncyPay-CRM-Key: agncy_crm_<connection>.<secret>',
+        idempotencyHeader: 'X-AgncyPay-Event-ID: stable provider event ID',
         payloadFormat: {
-          event: 'talent.sync | payable.created',
+          event: 'talent.sync | invoice.created | payable.created',
           data: {
             fullName: 'Creator Name',
             email: 'creator@example.com',
@@ -91,31 +214,130 @@ export class CrmService {
     };
   }
 
+  async createCrmConfig(agencyId: string, displayName?: string) {
+    const created = await this.sourceConnections.createCrmWebhookConnection(
+      agencyId,
+      displayName,
+    );
+    const baseUrl =
+      this.configService.get<string>('APP_URL') ||
+      'https://api.agncypay.internal';
+    return {
+      connectionId: created.connection.id,
+      displayName: created.connection.displayName,
+      webhookUrl: `${baseUrl}/api/v1/crm/webhook`,
+      apiKey: created.apiKey,
+      secretShownOnce: true,
+    };
+  }
+
+  async rotateCrmSecret(agencyId: string, connectionId: string) {
+    const rotated = await this.sourceConnections.rotateCrmWebhookSecret(
+      agencyId,
+      connectionId,
+    );
+    return { connectionId, apiKey: rotated.apiKey, secretShownOnce: true };
+  }
+
+  private async resolveAgencyActor(organizationId: string): Promise<string> {
+    const actor = await this.prisma.user.findFirst({
+      where: {
+        accountType: 'agency',
+        deletedAt: null,
+        participantLinks: {
+          some: {
+            participant: {
+              organizations: { some: { organizationId, status: 'active' } },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    if (!actor)
+      throw new NotFoundException(
+        'CRM connection has no active Agency operator',
+      );
+    return actor.id;
+  }
+
   /**
    * Process generic inbound webhook from Agency CRM (HubSpot, GoHighLevel, Airtable, etc.)
    */
-  async handleWebhook(apiKey: string | undefined, payload: CrmWebhookDto, authAgencyId?: string) {
-    let agencyId = authAgencyId;
-
-    if (!agencyId && apiKey) {
-      agencyId = await this.resolveAgencyFromApiKey(apiKey);
-    } else if (!agencyId && payload.agencyId) {
-      agencyId = payload.agencyId;
+  async handleWebhook(
+    apiKey: string,
+    externalEventId: string,
+    payload: CrmWebhookDto,
+  ) {
+    if (!externalEventId) {
+      throw new BadRequestException(
+        'X-AgncyPay-Event-ID header or payload eventId is required',
+      );
     }
-
-    if (!agencyId) {
-      // Fallback: Check if there is only 1 agency registered in dev/testing
-      const defaultAgency = await this.prisma.user.findFirst({
-        where: { accountType: 'agency', deletedAt: null },
-      });
-      if (defaultAgency) {
-        agencyId = defaultAgency.id;
-      } else {
-        throw new UnauthorizedException('Unable to resolve Agency workspace for CRM webhook');
-      }
+    const connection =
+      await this.sourceConnections.authenticateCrmApiKey(apiKey);
+    const received = await this.sourceConnections.receiveEvent({
+      connectionId: connection.id,
+      externalEventId,
+      eventType: payload.event,
+      payload: payload as unknown as Record<string, unknown>,
+      occurredAt: payload.occurredAt ? new Date(payload.occurredAt) : undefined,
+    });
+    if (
+      received.duplicate &&
+      !['received', 'failed'].includes(received.event.status)
+    ) {
+      return {
+        status: 'duplicate',
+        eventId: received.event.id,
+        eventState: received.event.status,
+      };
     }
+    const claimed = await this.sourceConnections.markEventProcessing(
+      received.event.id,
+    );
+    if (!claimed) {
+      return {
+        status: 'duplicate',
+        eventId: received.event.id,
+        eventState: 'processing',
+      };
+    }
+    const agencyId = await this.resolveAgencyActor(connection.organizationId!);
+    try {
+      const result = await this.processWebhookEvent(
+        payload,
+        agencyId,
+        connection,
+        received.event,
+      );
+      const ignored = result.status === 'acknowledged';
+      await this.sourceConnections.markEventProcessed(
+        received.event.id,
+        ignored,
+      );
+      return { ...result, eventId: received.event.id };
+    } catch (error) {
+      await this.sourceConnections.markEventFailed(received.event.id, error);
+      throw error;
+    }
+  }
 
-    this.logger.log(`Processing CRM webhook event: "${payload.event}" for agency: ${agencyId}`);
+  private async processWebhookEvent(
+    payload: CrmWebhookDto,
+    agencyId: string,
+    connection: {
+      id: string;
+      organizationId: string | null;
+      connectorKey: string;
+      externalTenantId: string;
+    },
+    sourceEvent: { id: string; externalEventId: string; payloadHash: string },
+  ) {
+    this.logger.log(
+      `Processing CRM webhook event: "${payload.event}" for agency: ${agencyId}`,
+    );
 
     const event = (payload.event || '').toLowerCase();
     const data = payload.data || {};
@@ -125,107 +347,162 @@ export class CrmService {
       case 'talent.created':
       case 'talent.updated':
       case 'contact.created': {
-        const fullName = data.fullName || data.name || `${data.firstName || ''} ${data.lastName || ''}`.trim();
+        const fullName =
+          data.fullName ||
+          data.name ||
+          `${data.firstName || ''} ${data.lastName || ''}`.trim();
         if (!fullName) {
-          throw new BadRequestException('Talent full name is required in webhook data');
+          throw new BadRequestException(
+            'Talent full name is required in webhook data',
+          );
         }
 
-        const talentResult = await this.talentService.createTalent({
+        const externalTalentId = data.externalId || data.id;
+        if (!externalTalentId) {
+          throw new BadRequestException(
+            'Stable CRM Talent externalId is required',
+          );
+        }
+
+        const organizationId = await this.getAgencyOrganizationId(agencyId);
+        const synced = await this.syncTalentParticipant({
           agencyId,
+          organizationId,
           fullName,
           email: data.email,
-          phone: data.phone,
-          country: data.country,
-          isInternational: data.isInternational || false,
+          connection,
+          externalTalentId: String(externalTalentId),
           metadata: {
             ...data.metadata,
             crmSource: data.crmSource || 'generic_webhook',
-            crmExternalId: data.externalId || data.id,
             importedAt: new Date().toISOString(),
           },
         });
 
-        // Generate talent invite activation link
-        const inviteToken = Buffer.from(`${talentResult.talent.id}:${Date.now()}`).toString('base64url');
-
         await this.auditLogsService.log({
           userId: agencyId,
           action: 'CRM_TALENT_INGESTED',
-          entityType: 'User',
-          entityId: talentResult.talent.id,
-          details: { event, fullName, email: data.email },
+          entityType: 'Participant',
+          entityId: synced.participant.id,
+          details: { event, fullName, email: synced.email },
         });
 
         return {
           status: 'success',
           action: 'talent_synced',
-          talentId: talentResult.talent.id,
-          fullName: talentResult.talent.fullName,
-          email: talentResult.talent.email,
-          inviteToken,
-          mobileAppDeepLink: `agncypay://activate?token=${inviteToken}&email=${encodeURIComponent(talentResult.talent.email)}`,
+          talentId: synced.participant.id,
+          fullName: synced.participant.displayName,
+          email: synced.email,
+          invitationId: synced.invitation?.invitationId,
+          inviteToken: synced.invitation?.token,
+          expiresAt: synced.invitation?.expiresAt,
+          mobileAppDeepLink: synced.invitation
+            ? `agncypay://activate?token=${synced.invitation.token}&email=${encodeURIComponent(synced.email)}`
+            : undefined,
         };
       }
 
       case 'payable.created':
+      case 'invoice.created':
+      case 'invoice.updated':
       case 'deal.closed':
       case 'deal.won': {
-        // Ingest payable into AgncyPay ledger pipeline waiting for batch approval
-        const amount = Number(data.amount) || 0;
-        if (amount <= 0) {
-          throw new BadRequestException('Payable amount must be greater than 0');
-        }
-
-        // Resolve or create talent record for this payable
-        let talentId = data.talentId;
-        if (!talentId && (data.talentEmail || data.talentName)) {
-          const talentName = data.talentName || data.talentEmail;
-          const created = await this.talentService.createTalent({
-            agencyId,
-            fullName: talentName,
-            email: data.talentEmail,
-          });
-          talentId = created.talent.id;
-        }
-
-        const payoutNumber = `PAY-CRM-${Math.floor(100000 + Math.random() * 900000)}`;
-
-        const pendingPayout = await this.prisma.paymentPayout.create({
-          data: {
-            payoutNumber,
-            agencyId,
-            talentId: talentId || null,
-            amount,
-            currency: data.currency || 'USD',
-            payoutType: data.payoutType || 'domestic',
-            status: 'PENDING_APPROVAL',
-            metadata: {
-              source: 'crm_webhook',
-              externalDealId: data.externalDealId || data.dealId || data.id,
-              campaign: data.campaign || data.title || 'CRM Ingested Payable',
-              brandName: data.brandName || 'Direct Client',
-              notes: data.notes || '',
-              rawPayload: data,
+        // The CRM supplies final economics. We only map beneficiaries and validate
+        // the supplied total/allocation; no payout exists until orchestration starts.
+        let talentId = data.talentId as string | undefined;
+        const externalTalentId = data.talentExternalId || data.externalTalentId;
+        if (!talentId && externalTalentId) {
+          const identity = await this.prisma.externalIdentityMap.findUnique({
+            where: {
+              sourceSystem_sourceTenantId_externalType_externalId: {
+                sourceSystem: connection.connectorKey,
+                sourceTenantId: connection.externalTenantId,
+                externalType: 'talent',
+                externalId: String(externalTalentId),
+              },
             },
-          },
+          });
+          talentId = identity?.participantId || undefined;
+        }
+        if (!talentId && data.talentEmail) {
+          const organizationId = await this.getAgencyOrganizationId(agencyId);
+          const created = await this.syncTalentParticipant({
+            agencyId,
+            organizationId,
+            fullName: data.talentName || data.talentEmail,
+            email: data.talentEmail,
+            connection,
+            externalTalentId: externalTalentId
+              ? String(externalTalentId)
+              : undefined,
+          });
+          talentId = created.participant.id;
+        }
+        if (talentId && externalTalentId) {
+          await this.prisma.externalIdentityMap.upsert({
+            where: {
+              sourceSystem_sourceTenantId_externalType_externalId: {
+                sourceSystem: connection.connectorKey,
+                sourceTenantId: connection.externalTenantId,
+                externalType: 'talent',
+                externalId: String(externalTalentId),
+              },
+            },
+            update: { participantId: talentId, status: 'active' },
+            create: {
+              participantId: talentId,
+              sourceSystem: connection.connectorKey,
+              sourceTenantId: connection.externalTenantId,
+              externalType: 'talent',
+              externalId: String(externalTalentId),
+              metadata: { connectionId: connection.id },
+            },
+          });
+        }
+
+        const normalizedData = {
+          ...data,
+          documentType: event.startsWith('invoice.')
+            ? 'invoice'
+            : data.documentType || 'payable',
+          talentId,
+          talentExternalId: externalTalentId,
+        };
+        const ingested = await this.commercialDocuments.ingestPayable({
+          connection,
+          sourceEvent,
+          data: normalizedData,
         });
 
         await this.auditLogsService.log({
           userId: agencyId,
           action: 'CRM_PAYABLE_INGESTED',
-          entityType: 'PaymentPayout',
-          entityId: pendingPayout.id,
-          details: { amount, payoutNumber, talentId },
+          entityType: 'CommercialDocument',
+          entityId: ingested.document.id,
+          details: {
+            versionId: ingested.version.id,
+            versionNumber: ingested.version.versionNumber,
+            validationStatus: ingested.version.validationStatus,
+            talentId,
+          },
         });
 
         return {
           status: 'success',
-          action: 'payable_created',
-          payoutId: pendingPayout.id,
-          payoutNumber: pendingPayout.payoutNumber,
-          amount: pendingPayout.amount,
-          approvalStatus: pendingPayout.status,
-          message: 'Payable queued in AgncyPay Batch Approval queue',
+          action:
+            normalizedData.documentType === 'invoice'
+              ? 'commercial_invoice_ingested'
+              : 'commercial_payable_ingested',
+          documentId: ingested.document.id,
+          versionId: ingested.version.id,
+          versionNumber: ingested.version.versionNumber,
+          validationStatus: ingested.version.validationStatus,
+          approvalStatus: ingested.version.approval?.status || null,
+          duplicate: ingested.duplicate,
+          message:
+            ingested.version.validationStatus === 'valid'
+              ? `CRM ${normalizedData.documentType} validated and queued for approval`
+              : `CRM ${normalizedData.documentType} recorded with validation findings`,
         };
       }
 
@@ -243,37 +520,56 @@ export class CrmService {
    */
   async importCsvRoster(agencyId: string, dto: CsvRosterImportDto) {
     if (!dto.roster || !Array.isArray(dto.roster) || dto.roster.length === 0) {
-      throw new BadRequestException('Roster array is required and must not be empty');
+      throw new BadRequestException(
+        'Roster array is required and must not be empty',
+      );
     }
 
-    const syncResult = await this.talentService.importTalentRoster(agencyId, dto.roster);
-
-    // Attach activation invite tokens for mobile app onboarding
-    const talentsWithInvites = syncResult.talents.map((t) => {
-      const inviteToken = Buffer.from(`${t.id}:${Date.now()}`).toString('base64url');
-      return {
-        ...t,
-        inviteToken,
-        inviteLink: `https://app.agncypay.internal/invite?token=${inviteToken}`,
-        mobileAppDeepLink: `agncypay://activate?token=${inviteToken}&email=${encodeURIComponent(t.email || '')}`,
-      };
-    });
+    const organizationId = await this.getAgencyOrganizationId(agencyId);
+    const talentsWithInvites: Array<Record<string, unknown>> = [];
+    for (const row of dto.roster) {
+      const synced = await this.syncTalentParticipant({
+        agencyId,
+        organizationId,
+        fullName: row.fullName,
+        email: row.email,
+        connection: row.externalTalentId
+          ? {
+              id: 'csv-import',
+              connectorKey: 'csv',
+              externalTenantId: organizationId,
+            }
+          : undefined,
+        externalTalentId: row.externalTalentId,
+        metadata: row.metadata,
+      });
+      talentsWithInvites.push({
+        id: synced.participant.id,
+        fullName: synced.participant.displayName,
+        email: synced.email,
+        invitationId: synced.invitation?.invitationId,
+        inviteToken: synced.invitation?.token,
+        expiresAt: synced.invitation?.expiresAt,
+        mobileAppDeepLink: synced.invitation
+          ? `agncypay://activate?token=${synced.invitation.token}&email=${encodeURIComponent(synced.email)}`
+          : undefined,
+      });
+    }
 
     await this.auditLogsService.log({
       userId: agencyId,
       action: 'CSV_ROSTER_INGESTED',
       entityType: 'User',
       details: {
-        totalReceived: syncResult.totalReceived,
-        importedCount: syncResult.importedCount,
-        updatedCount: syncResult.updatedCount,
+        totalReceived: dto.roster.length,
+        importedCount: talentsWithInvites.length,
       },
     });
 
     return {
-      totalReceived: syncResult.totalReceived,
-      importedCount: syncResult.importedCount,
-      updatedCount: syncResult.updatedCount,
+      totalReceived: dto.roster.length,
+      importedCount: talentsWithInvites.length,
+      updatedCount: 0,
       talents: talentsWithInvites,
     };
   }
@@ -282,31 +578,6 @@ export class CrmService {
    * Get all pending payables ingested from CRM awaiting batch review & approval
    */
   async getPendingPayables(agencyId: string) {
-    const payables = await this.prisma.paymentPayout.findMany({
-      where: {
-        agencyId,
-        status: 'PENDING_APPROVAL',
-      },
-      include: {
-        talent: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-            agncyId: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    const totalAmount = payables.reduce((acc, p) => acc + Number(p.amount), 0);
-
-    return {
-      count: payables.length,
-      totalAmount,
-      currency: 'USD',
-      payables,
-    };
+    return this.commercialDocuments.listPendingForAgency(agencyId);
   }
 }

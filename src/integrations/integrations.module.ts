@@ -6,12 +6,15 @@ import { QuickBooksProvider } from '../infrastructure/providers/quickbooks/quick
 import { XeroProvider } from '../infrastructure/providers/xero/xero.provider';
 import { SageProvider } from '../infrastructure/providers/sage/sage.provider';
 
-import { QuickBooksModule } from '../modules/quickbooks/quickbooks.module';
-
 @Module({
-  imports: [PrismaModule, QuickBooksModule],
+  imports: [PrismaModule],
   controllers: [IntegrationsController],
-  providers: [IntegrationsService, QuickBooksProvider, XeroProvider, SageProvider],
+  providers: [
+    IntegrationsService,
+    QuickBooksProvider,
+    XeroProvider,
+    SageProvider,
+  ],
   exports: [IntegrationsService],
 })
 export class IntegrationsModule {}

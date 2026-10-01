@@ -1,21 +1,46 @@
-import { Controller, Get, Post, Delete, Body, Param, Query, UseGuards, Res, Req } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Param,
+  Query,
+  UseGuards,
+  Res,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { IntegrationsService } from './integrations.service';
-import { QuickBooksService } from '../modules/quickbooks/quickbooks.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators';
+import { AuthorizationGuard } from '../auth/guards/authorization.guard';
+import {
+  AccountTypes,
+  Permissions,
+} from '../auth/decorators/authorization.decorator';
+import { ConfigService } from '@nestjs/config';
 
 @ApiTags('Integrations')
 @Controller('integrations')
 export class IntegrationsController {
   constructor(
     private readonly integrationsService: IntegrationsService,
-    private readonly quickbooksService: QuickBooksService,
+    private readonly configService: ConfigService,
   ) {}
 
+  private frontendRedirect(returnTo: string, query: string) {
+    const frontend =
+      this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
+    const url = new URL(returnTo, frontend);
+    url.search = query;
+    return url.toString();
+  }
+
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: 'Get all connected third-party integrations status' })
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
+  @ApiOperation({
+    summary: 'Get all connected third-party integrations status',
+  })
   @Get('status')
   async getStatus(@CurrentUser('id') userId: string) {
     return this.integrationsService.getStatus(userId);
@@ -23,32 +48,51 @@ export class IntegrationsController {
 
   // ────────────── QUICKBOOKS ──────────────
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
+  @Permissions('manage_team')
   @ApiOperation({ summary: 'Get QuickBooks OAuth authorization URL' })
   @Get('quickbooks/connect')
-  async getQuickBooksAuthUrl() {
-    return this.integrationsService.getQuickBooksAuthUrl();
+  async getQuickBooksAuthUrl(
+    @CurrentUser('id') userId: string,
+    @Query('returnTo') returnTo?: string,
+  ) {
+    return this.integrationsService.getQuickBooksAuthUrl(userId, returnTo);
   }
 
-  @ApiOperation({ summary: 'QuickBooks OAuth callback handler (browser redirect)' })
+  @ApiOperation({
+    summary: 'QuickBooks OAuth callback handler (browser redirect)',
+  })
   @Get('quickbooks/callback')
   async handleQuickBooksCallback(
     @Query('code') code: string,
     @Query('realmId') realmId: string,
     @Query('state') state: string,
-    @Req() req: any,
     @Res() res: any,
   ) {
     try {
-      const redirectUrl = await this.quickbooksService.handleCallback(code, realmId, state, req.url);
-      return res.redirect(redirectUrl);
+      const returnTo =
+        await this.integrationsService.completeQuickBooksCallback(
+          code,
+          realmId,
+          state,
+        );
+      return res.redirect(
+        this.frontendRedirect(returnTo, 'quickbooks_connected=true'),
+      );
     } catch (err: any) {
-      return res.redirect(`http://localhost:3000/branddashboard?qb_error=${encodeURIComponent(err.message || 'QuickBooks authorization failed.')}`);
+      return res.redirect(
+        this.frontendRedirect(
+          '/agencydashboard/integrations',
+          `quickbooks_error=${encodeURIComponent(err.message || 'Authorization failed')}`,
+        ),
+      );
     }
   }
 
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
   @ApiOperation({ summary: 'Get read-only imported QuickBooks invoices' })
   @Get('quickbooks/invoices')
   async getQuickBooksInvoices(@CurrentUser('id') userId: string) {
@@ -57,11 +101,16 @@ export class IntegrationsController {
 
   // ────────────── XERO ──────────────
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
+  @Permissions('manage_team')
   @ApiOperation({ summary: 'Get Xero OAuth authorization URL' })
   @Get('xero/connect')
-  async getXeroAuthUrl() {
-    return this.integrationsService.getXeroAuthUrl();
+  async getXeroAuthUrl(
+    @CurrentUser('id') userId: string,
+    @Query('returnTo') returnTo?: string,
+  ) {
+    return this.integrationsService.getXeroAuthUrl(userId, returnTo);
   }
 
   @ApiOperation({ summary: 'Xero OAuth callback handler' })
@@ -69,13 +118,31 @@ export class IntegrationsController {
   async handleXeroCallback(
     @Query('code') code: string,
     @Query('tenantId') tenantId: string,
+    @Query('state') state: string,
     @Res() res: any,
   ) {
-    return res.redirect('http://localhost:3000/branddashboard?xero_connected=true');
+    try {
+      const returnTo = await this.integrationsService.completeXeroCallback(
+        code,
+        tenantId,
+        state,
+      );
+      return res.redirect(
+        this.frontendRedirect(returnTo, 'xero_connected=true'),
+      );
+    } catch (err: any) {
+      return res.redirect(
+        this.frontendRedirect(
+          '/agencydashboard/integrations',
+          `xero_error=${encodeURIComponent(err.message || 'Authorization failed')}`,
+        ),
+      );
+    }
   }
 
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
   @ApiOperation({ summary: 'Get imported Xero invoices' })
   @Get('xero/invoices')
   async getXeroInvoices(@CurrentUser('id') userId: string) {
@@ -84,11 +151,16 @@ export class IntegrationsController {
 
   // ────────────── SAGE ──────────────
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
+  @Permissions('manage_team')
   @ApiOperation({ summary: 'Get Sage OAuth authorization URL' })
   @Get('sage/connect')
-  async getSageAuthUrl() {
-    return this.integrationsService.getSageAuthUrl();
+  async getSageAuthUrl(
+    @CurrentUser('id') userId: string,
+    @Query('returnTo') returnTo?: string,
+  ) {
+    return this.integrationsService.getSageAuthUrl(userId, returnTo);
   }
 
   @ApiOperation({ summary: 'Sage OAuth callback handler' })
@@ -96,50 +168,60 @@ export class IntegrationsController {
   async handleSageCallback(
     @Query('code') code: string,
     @Query('realmId') realmId: string,
+    @Query('state') state: string,
     @Res() res: any,
   ) {
-    return res.redirect('http://localhost:3000/branddashboard?sage_connected=true');
+    try {
+      const returnTo = await this.integrationsService.completeSageCallback(
+        code,
+        realmId,
+        state,
+      );
+      return res.redirect(
+        this.frontendRedirect(returnTo, 'sage_connected=true'),
+      );
+    } catch (err: any) {
+      return res.redirect(
+        this.frontendRedirect(
+          '/agencydashboard/integrations',
+          `sage_error=${encodeURIComponent(err.message || 'Authorization failed')}`,
+        ),
+      );
+    }
   }
 
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
   @ApiOperation({ summary: 'Get imported Sage invoices and accounting data' })
   @Get('sage/invoices')
   async getSageInvoices(@CurrentUser('id') userId: string) {
     return this.integrationsService.getSageInvoices(userId);
   }
 
-  // ────────────── GENERIC PROVIDER CONNECT / DISCONNECT ──────────────
+  // ────────────── GENERIC PROVIDER DISCONNECT ──────────────
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: 'Connect provider by name' })
-  @Post(':provider/connect')
-  async connectProvider(
-    @CurrentUser('id') userId: string,
-    @Param('provider') provider: string,
-    @Body() body: { externalId?: string }
-  ) {
-    return this.integrationsService.connectProvider(userId, provider, body.externalId);
-  }
-
-  @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
+  @Permissions('manage_team')
   @ApiOperation({ summary: 'Disconnect provider' })
   @Delete(':provider/disconnect')
   async disconnectProvider(
     @CurrentUser('id') userId: string,
-    @Param('provider') provider: string
+    @Param('provider') provider: string,
   ) {
     return this.integrationsService.disconnectProvider(userId, provider);
   }
 
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AuthorizationGuard)
+  @AccountTypes('agency')
+  @Permissions('manage_team')
   @ApiOperation({ summary: 'Disconnect provider via POST' })
   @Post(':provider/disconnect')
   async disconnectProviderPost(
     @CurrentUser('id') userId: string,
-    @Param('provider') provider: string
+    @Param('provider') provider: string,
   ) {
     return this.integrationsService.disconnectProvider(userId, provider);
   }

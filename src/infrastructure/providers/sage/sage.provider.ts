@@ -1,4 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  BadGatewayException,
+  Injectable,
+  Logger,
+  NotImplementedException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   IAccountingIntegrationProvider,
@@ -14,25 +20,28 @@ export class SageProvider implements IAccountingIntegrationProvider {
 
   constructor(private readonly configService: ConfigService) {
     this.clientId = this.configService.get<string>('SAGE_CLIENT_ID') || null;
-    this.clientSecret = this.configService.get<string>('SAGE_CLIENT_SECRET') || null;
+    this.clientSecret =
+      this.configService.get<string>('SAGE_CLIENT_SECRET') || null;
     this.redirectUri =
       this.configService.get<string>('SAGE_REDIRECT_URI') ||
-      'http://localhost:3000/dashboard/settings/integrations/sage?callback=true';
+      'http://localhost:3001/api/v1/integrations/sage/callback';
 
     if (!this.clientId || !this.clientSecret) {
-      this.logger.warn('Sage credentials not provided. Operating in simulated mode.');
+      this.logger.warn(
+        'Sage credentials not provided. Connector is unavailable.',
+      );
     }
   }
 
-  async getAuthUrl(): Promise<string> {
+  async getAuthUrl(state = ''): Promise<string> {
     if (!this.clientId || !this.clientSecret) {
-      return 'http://localhost:3000/dashboard/settings/integrations/sage?connected=sage&simulated=true';
+      throw new ServiceUnavailableException('Sage OAuth is not configured');
     }
 
     const scope = encodeURIComponent('full_access');
     return `https://www.sageone.com/oauth2/auth/central?response_type=code&client_id=${this.clientId}&redirect_uri=${encodeURIComponent(
       this.redirectUri,
-    )}&scope=${scope}&state=agncypay-sage-state`;
+    )}&scope=${scope}&state=${encodeURIComponent(state)}`;
   }
 
   async handleCallback(
@@ -40,11 +49,7 @@ export class SageProvider implements IAccountingIntegrationProvider {
     realmId?: string,
   ): Promise<{ accessToken: string; refreshToken: string; expiresAt: Date }> {
     if (!this.clientId || !this.clientSecret) {
-      return {
-        accessToken: `sage-access-simulated-${Date.now()}`,
-        refreshToken: `sage-refresh-simulated-${Date.now()}`,
-        expiresAt: new Date(Date.now() + 3600 * 1000),
-      };
+      throw new ServiceUnavailableException('Sage OAuth is not configured');
     }
 
     try {
@@ -63,51 +68,45 @@ export class SageProvider implements IAccountingIntegrationProvider {
       });
 
       const token = await response.json();
+      if (!response.ok || !token.access_token || !token.refresh_token) {
+        throw new Error(
+          `Sage token exchange failed with HTTP ${response.status}`,
+        );
+      }
       return {
-        accessToken: token.access_token || `sage-access-simulated-${Date.now()}`,
-        refreshToken: token.refresh_token || `sage-refresh-simulated-${Date.now()}`,
+        accessToken: token.access_token,
+        refreshToken: token.refresh_token,
         expiresAt: new Date(Date.now() + (token.expires_in || 3600) * 1000),
       };
     } catch (err: any) {
       this.logger.error(`Sage OAuth callback failed: ${err.message}`);
-      return {
-        accessToken: `sage-access-simulated-${Date.now()}`,
-        refreshToken: `sage-refresh-simulated-${Date.now()}`,
-        expiresAt: new Date(Date.now() + 3600 * 1000),
-      };
+      throw new BadGatewayException(
+        `Sage token exchange failed: ${err.message}`,
+      );
     }
   }
 
-  async getInvoices(accessToken: string, companyId?: string): Promise<SyncedInvoice[]> {
-    if (!this.clientId || accessToken.includes('simulated')) {
-      return [
-        {
-          id: 'sage-inv-1',
-          docNumber: 'S-2001',
-          name: 'Universal Music France (Sage Synced)',
-          amount: 8400,
-          dueDate: '2026-08-30',
-          status: 'paid',
-        },
-        {
-          id: 'sage-inv-2',
-          docNumber: 'S-2002',
-          name: 'EMI Music Group (Sage Synced)',
-          amount: 19500,
-          dueDate: '2026-08-18',
-          status: 'pending',
-        },
-      ];
+  async getInvoices(
+    accessToken: string,
+    companyId?: string,
+  ): Promise<SyncedInvoice[]> {
+    if (!this.clientId) {
+      throw new ServiceUnavailableException('Sage connector is not configured');
     }
 
     try {
-      const response = await fetch('https://api.accounting.sage.com/v3.1/sales_invoices', {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: 'application/json',
+      const response = await fetch(
+        'https://api.accounting.sage.com/v3.1/sales_invoices',
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json',
+          },
         },
-      });
+      );
 
+      if (!response.ok)
+        throw new Error(`Sage invoice API HTTP ${response.status}`);
       const data = await response.json();
       const invoices = data.$items || [];
 
@@ -122,36 +121,15 @@ export class SageProvider implements IAccountingIntegrationProvider {
       }));
     } catch (err: any) {
       this.logger.error(`Failed to fetch Sage invoices: ${err.message}`);
-      return [
-        {
-          id: 'sage-inv-1',
-          docNumber: 'S-2001',
-          name: 'Universal Music France (Sage Synced)',
-          amount: 8400,
-          dueDate: '2026-08-30',
-          status: 'paid',
-        },
-      ];
+      throw new BadGatewayException(`Sage invoice sync failed: ${err.message}`);
     }
   }
 
   async getPayouts(accessToken: string, companyId?: string): Promise<any[]> {
-    return [
-      {
-        id: 'sage-pay-1',
-        vendorName: 'Karlos Talent (Sage)',
-        description: 'Sage processed split royalty',
-        amount: '$8,400.00',
-        paymentMethod: 'ACH',
-        status: 'Paid',
-      },
-    ];
+    throw new NotImplementedException('Sage payout import is not implemented');
   }
 
   async getVendors(accessToken: string, companyId?: string): Promise<any[]> {
-    return [
-      { id: 'sage-ven-1', name: 'Universal Music France', email: 'billing@universalmusic.fr' },
-      { id: 'sage-ven-2', name: 'EMI Music Group', email: 'accounts@emimusic.com' },
-    ];
+    throw new NotImplementedException('Sage vendor import is not implemented');
   }
 }
