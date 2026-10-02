@@ -9,7 +9,7 @@ import { OrganizationRoles } from '../../auth/decorators/authorization.decorator
 @ApiTags('Reconciliation')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, AuthorizationGuard)
-@OrganizationRoles('super_admin', 'treasury')
+@OrganizationRoles('platform_admin', 'super_admin', 'treasury')
 @Controller('reconciliation')
 export class ReconciliationController {
   constructor(private readonly reconciliationService: ReconciliationService) {}

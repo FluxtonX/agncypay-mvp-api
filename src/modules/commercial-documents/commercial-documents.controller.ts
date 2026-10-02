@@ -5,7 +5,7 @@ import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { AuthorizationGuard } from '../../auth/guards/authorization.guard';
 import {
   AccountTypes,
-  Permissions,
+  OrganizationRoles,
 } from '../../auth/decorators/authorization.decorator';
 import { CurrentUser } from '../../common/decorators';
 import { CommercialDocumentsService } from './commercial-documents.service';
@@ -51,7 +51,7 @@ export class CommercialDocumentsController {
   @ApiOperation({
     summary: 'Approve or reject a validated immutable document version',
   })
-  @Permissions('approve_payouts')
+  @OrganizationRoles('agency_owner')
   @AccountTypes('agency')
   @Post('versions/:versionId/decision')
   decide(
@@ -66,7 +66,7 @@ export class CommercialDocumentsController {
     summary:
       'Create exact Agency funding instructions for an approved CRM payable',
   })
-  @Permissions('approve_payouts')
+  @OrganizationRoles('agency_owner')
   @AccountTypes('agency')
   @Post('versions/:versionId/talent-funding')
   prepareTalentFunding(

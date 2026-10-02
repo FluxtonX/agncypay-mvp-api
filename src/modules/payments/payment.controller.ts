@@ -19,6 +19,7 @@ import { CurrentUser } from '../../common/decorators';
 import { AuthorizationGuard } from '../../auth/guards/authorization.guard';
 import {
   AccountTypes,
+  OrganizationRoles,
   Permissions,
 } from '../../auth/decorators/authorization.decorator';
 import { CreateBrandPaymentDto, ProvisionAgencyRailsDto } from './payment.dto';
@@ -56,7 +57,7 @@ export class PaymentController {
   })
   @Post('agency/rails')
   @AccountTypes('agency')
-  @Permissions('manage_team')
+  @OrganizationRoles('agency_owner')
   provisionAgencyRails(
     @CurrentUser('id') userId: string,
     @Body() body: ProvisionAgencyRailsDto,

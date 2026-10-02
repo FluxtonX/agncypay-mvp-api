@@ -1,0 +1,18 @@
+aws_region       = "us-east-1"
+environment      = "staging"
+domain_name      = "agncy.xyz"
+api_domain_name  = "api-staging.agncy.xyz"
+frontend_url     = "https://staging.agncy.xyz"
+auth_email_from  = "AgncyPay <no-reply@agncy.xyz>"
+
+# First apply:
+certificate_ready = false
+create_task_definition = false
+deploy_service          = false
+container_image         = ""
+
+# After DNS validation and the first immutable ECR push:
+# certificate_ready = true
+# create_task_definition = true
+# deploy_service     = true
+# container_image    = "<account>.dkr.ecr.us-east-1.amazonaws.com/agncypay-api:<git-sha>"

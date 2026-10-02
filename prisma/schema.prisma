@@ -14,18 +14,21 @@ datasource db {
 // ─────────────────────────── USER & AUTH ───────────────────────────
 
 model User {
-  id                String      @id @default(uuid())
-  email             String      @unique
-  password          String
-  fullName          String
-  accountType       AccountType
-  agncyId           String      @unique
-  emailVerified     Boolean     @default(false)
-  resetToken        String?
-  resetTokenExpires DateTime?
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
-  deletedAt         DateTime?
+  id                            String      @id @default(uuid())
+  email                         String      @unique
+  password                      String
+  fullName                      String
+  accountType                   AccountType
+  agncyId                       String      @unique
+  emailVerified                 Boolean     @default(false)
+  resetToken                    String?
+  resetTokenExpires             DateTime?
+  emailVerificationToken        String?
+  emailVerificationTokenExpires DateTime?
+  sessionVersion                Int         @default(0)
+  createdAt                     DateTime    @default(now())
+  updatedAt                     DateTime    @updatedAt
+  deletedAt                     DateTime?
 
   kybStatus KybStatus @default(not_started)
 
@@ -47,7 +50,7 @@ model User {
 
 model RefreshToken {
   id        String   @id @default(uuid())
-  token     String   @unique
+  tokenHash String   @unique
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
@@ -60,9 +63,17 @@ enum AccountType {
   brand
   agency
   talent
+  platform
 }
 
 enum OrganizationRole {
+  platform_admin
+  agency_owner
+  agency_finance
+  agency_viewer
+  brand_admin
+  brand_finance
+  brand_viewer
   admin
   finance
   approver

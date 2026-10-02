@@ -101,7 +101,8 @@ export class LedgerController {
     summary: 'Get global double-entry trial balance (Admin/Reconciliation)',
   })
   @Get('trial-balance')
-  @OrganizationRoles('super_admin', 'treasury')
+  @AccountTypes('platform')
+  @OrganizationRoles('platform_admin', 'super_admin', 'treasury')
   async getTrialBalance() {
     return this.ledgerService.getCanonicalTrialBalance();
   }

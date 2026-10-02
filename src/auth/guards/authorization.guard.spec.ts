@@ -18,7 +18,10 @@ describe('AuthorizationGuard', () => {
         .mockReturnValueOnce(undefined)
         .mockReturnValueOnce(undefined),
     } as unknown as Reflector;
-    const guard = new AuthorizationGuard(reflector, {} as any);
+    const prisma = {
+      organizationParticipant: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const guard = new AuthorizationGuard(reflector, prisma as any);
 
     await expect(
       guard.canActivate(contextFor({ id: 'brand-1', accountType: 'brand' })),
@@ -104,6 +107,36 @@ describe('AuthorizationGuard', () => {
 
     await expect(
       guard.canActivate(contextFor({ id: 'brand-1', accountType: 'brand' })),
+    ).resolves.toBe(true);
+  });
+
+  it('allows a user to use an additional Brand persona through membership', async () => {
+    const reflector = {
+      getAllAndOverride: jest
+        .fn()
+        .mockReturnValueOnce(['brand'])
+        .mockReturnValueOnce(undefined)
+        .mockReturnValueOnce(['initiate_payments']),
+    } as unknown as Reflector;
+    const prisma = {
+      organizationParticipant: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            organizationId: 'brand-org',
+            metadata: {
+              organizationRole: 'brand_admin',
+              permissions: ['initiate_payments'],
+            },
+          },
+        ]),
+      },
+    };
+    const guard = new AuthorizationGuard(reflector, prisma as any);
+
+    await expect(
+      guard.canActivate(
+        contextFor({ id: 'agency-primary', accountType: 'agency' }),
+      ),
     ).resolves.toBe(true);
   });
 

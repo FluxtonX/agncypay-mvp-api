@@ -43,3 +43,12 @@ pids/
 # Temporary files
 tmp/
 temp/
+
+# Terraform runtime/state (lock files and examples remain tracked)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+backend.hcl
+!backend.hcl.example

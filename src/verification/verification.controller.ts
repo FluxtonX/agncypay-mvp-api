@@ -9,7 +9,10 @@ import {
 } from 'class-validator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AuthorizationGuard } from '../auth/guards/authorization.guard';
-import { AccountTypes } from '../auth/decorators/authorization.decorator';
+import {
+  AccountTypes,
+  OrganizationRoles,
+} from '../auth/decorators/authorization.decorator';
 import { CurrentUser } from '../common/decorators';
 import { VerificationService } from './verification.service';
 
@@ -65,7 +68,7 @@ export class VerificationController {
   @ApiOperation({
     summary: 'Discover configured payment-provider onboarding requirements',
   })
-  @AccountTypes('brand', 'agency')
+  @AccountTypes('agency')
   @Get('provider/requirements')
   getProviderRequirements(@Query('country') country?: string) {
     return this.verificationService.getOnboardingRequirements(country || 'USA');
@@ -75,7 +78,8 @@ export class VerificationController {
     summary:
       'Submit the authenticated organization to the configured payment provider',
   })
-  @AccountTypes('brand', 'agency')
+  @AccountTypes('agency')
+  @OrganizationRoles('agency_owner')
   @Post('provider/onboarding')
   submitProviderOnboarding(@CurrentUser('id') userId: string) {
     return this.verificationService.submitOrganizationOnboarding(userId);
@@ -85,6 +89,7 @@ export class VerificationController {
     summary: 'Provision a provider-independent organization deposit account',
   })
   @AccountTypes('agency')
+  @OrganizationRoles('agency_owner')
   @Post('provider/deposit-account')
   provisionDepositAccount(@CurrentUser('id') userId: string) {
     return this.verificationService.provisionDepositAccount(userId);

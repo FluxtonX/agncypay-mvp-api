@@ -19,7 +19,7 @@ export class FeatureFlagsController {
   @ApiOperation({ summary: 'Set or update a feature flag (Protected)' })
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, AuthorizationGuard)
-  @OrganizationRoles('super_admin')
+  @OrganizationRoles('platform_admin', 'super_admin')
   @Post()
   async setFlag(
     @Body() body: { key: string; enabled: boolean; description?: string },

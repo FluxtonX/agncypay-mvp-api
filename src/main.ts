@@ -7,6 +7,12 @@ import { configuredOrigins, isOriginAllowed } from './common/security/cors';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
 
+  app.enableShutdownHooks();
+
+  // ECS tasks are reachable only through the ALB security group. Trusting one
+  // proxy hop preserves the client IP for throttling and audit middleware.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
   // Global prefix
   app.setGlobalPrefix('api/v1');
 

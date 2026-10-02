@@ -11,6 +11,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { OrganizationRole } from '@prisma/client';
 
 export class CreateInvitationDto {
   @ApiProperty()
@@ -28,12 +29,17 @@ export class CreateInvitationDto {
 
   @ApiProperty({ example: 'talent' })
   @IsString()
-  @IsNotEmpty()
-  relationshipType!: string;
+  @IsOptional()
+  relationshipType?: string;
 
   @IsString()
   @IsOptional()
-  organizationRole?: string;
+  @IsEnum(OrganizationRole)
+  organizationRole?: OrganizationRole;
+
+  @IsString()
+  @IsOptional()
+  organizationName?: string;
 
   @IsArray()
   @IsString({ each: true })
@@ -54,9 +60,11 @@ export class AcceptInvitationDto {
 
   @IsString()
   @MinLength(12)
-  password!: string;
+  @IsOptional()
+  password?: string;
 
   @IsString()
   @IsNotEmpty()
-  fullName!: string;
+  @IsOptional()
+  fullName?: string;
 }

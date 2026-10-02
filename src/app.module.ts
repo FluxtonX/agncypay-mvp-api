@@ -22,12 +22,23 @@ import { CommercialDocumentsModule } from './modules/commercial-documents/commer
 import { PaymentOrchestrationModule } from './modules/payment-orchestration/payment-orchestration.module';
 import { TalentBalancesModule } from './modules/talent-balances/talent-balances.module';
 import { FxModule } from './modules/fx/fx.module';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { HealthModule } from './modules/health/health.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     EventEmitterModule.forRoot(),
+    ThrottlerModule.forRoot([
+      {
+        name: 'default',
+        ttl: 60_000,
+        limit: 120,
+      },
+    ]),
     PrismaModule,
+    HealthModule,
     SourceConnectionsModule,
     CommercialDocumentsModule,
     PaymentOrchestrationModule,
@@ -47,6 +58,12 @@ import { FxModule } from './modules/fx/fx.module';
     CrmModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
 })
 export class AppModule {}

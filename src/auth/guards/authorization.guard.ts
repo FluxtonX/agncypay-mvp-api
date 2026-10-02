@@ -12,6 +12,14 @@ import {
   ORGANIZATION_ROLES_KEY,
   PERMISSIONS_KEY,
 } from '../decorators/authorization.decorator';
+import { ACCOUNT_TYPE_ROLES } from '../access-policy';
+
+type AuthenticatedRequest = {
+  user?: {
+    id: string;
+    accountType: AccountType;
+  };
+};
 
 @Injectable()
 export class AuthorizationGuard implements CanActivate {
@@ -38,30 +46,25 @@ export class AuthorizationGuard implements CanActivate {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const user = request.user;
     if (!user?.id) {
       throw new ForbiddenException('Authenticated user is required');
     }
 
-    if (accountTypes?.length && !accountTypes.includes(user.accountType)) {
-      throw new ForbiddenException(
-        'Account type is not authorized for this operation',
-      );
-    }
-
-    if (roles?.length || permissions?.length) {
+    if (accountTypes?.length || roles?.length || permissions?.length) {
       const organizationAccess =
         await this.prisma.organizationParticipant.findMany({
           where: {
             status: 'active',
             participant: { users: { some: { userId: user.id } } },
           },
-          select: { metadata: true },
+          select: { metadata: true, organizationId: true },
         });
       const canonicalAccess = organizationAccess.map((item) => {
         const metadata = (item.metadata || {}) as Record<string, unknown>;
         return {
+          organizationId: item.organizationId,
           role: metadata.organizationRole as OrganizationRole | undefined,
           permissions: Array.isArray(metadata.permissions)
             ? metadata.permissions.filter(
@@ -71,6 +74,21 @@ export class AuthorizationGuard implements CanActivate {
         };
       });
       const access = canonicalAccess;
+
+      if (accountTypes?.length) {
+        const personaAllowed = accountTypes.includes(user.accountType);
+        const membershipAllowed = accountTypes.some((accountType) => {
+          const allowedRoles = ACCOUNT_TYPE_ROLES[accountType] ?? [];
+          return access.some(
+            (item) => item.role && allowedRoles.includes(item.role),
+          );
+        });
+        if (!personaAllowed && !membershipAllowed) {
+          throw new ForbiddenException(
+            'Account type is not authorized for this operation',
+          );
+        }
+      }
 
       if (
         roles?.length &&

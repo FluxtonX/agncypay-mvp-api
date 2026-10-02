@@ -34,6 +34,20 @@ describe('AgncyPay runtime surface (e2e)', () => {
       .expect('Hello World!');
   });
 
+  it('exposes liveness and database readiness separately', async () => {
+    await request(app.getHttpServer())
+      .get('/api/v1/health/live')
+      .expect(200)
+      .expect({ status: 'ok' });
+    await request(app.getHttpServer())
+      .get('/api/v1/health/ready')
+      .expect(200)
+      .expect({
+        status: 'ready',
+        checks: { configuration: 'ok', database: 'ok' },
+      });
+  });
+
   it.each([
     ['post', '/api/v1/auth/register'],
     ['get', '/api/v1/wallets/me'],

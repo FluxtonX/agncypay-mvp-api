@@ -23,6 +23,6 @@ export class ResetPasswordDto {
     description: 'New account password',
   })
   @IsString()
-  @MinLength(6)
+  @MinLength(12)
   newPassword!: string;
 }
